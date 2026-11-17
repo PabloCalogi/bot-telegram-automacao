@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import re
 from decimal import Decimal, ROUND_HALF_UP
@@ -61,14 +62,15 @@ def format_offer_message(
 
     return "\n".join(
         (
-            "🔥 OFERTA AMAZON!",
-            f"📦 Produto: {title}",
-            f"💰 De: R$ {_format_brl(product.original_price)}",
-            f"🔥 Por: R$ {_format_brl(product.current_price)}",
-            f"📉 Desconto: {str(discount).replace('.', ',')}% OFF",
-            "🛒 COMPRE AQUI:",
-            affiliate_url,
-            "⚠️ Preço sujeito a alteração.",
+            "<b>🚨 OFERTA DETECTADA! 🚨</b>",
+            "",
+            html.escape(title),
+            "",
+            f"❌ De: R$ {_format_brl(product.original_price)}",
+            f"✅ Por: R$ <b>{_format_brl(product.current_price)}</b>",
+            f"🔥 Desconto de: <b>{str(discount).replace('.', ',')}%</b>",
+            "",
+            f"🛒 Compre aqui: {html.escape(affiliate_url)}",
         )
     )
 
@@ -95,11 +97,13 @@ async def process_product(
             chat_id=settings.telegram_channel_id,
             photo=product.image_url,
             caption=message,
+            parse_mode="HTML",
         )
     else:
         await bot.send_message(
             chat_id=settings.telegram_channel_id,
             text=message,
+            parse_mode="HTML",
         )
 
     if not store.record_sent(product.asin):
