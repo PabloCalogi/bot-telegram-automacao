@@ -1,0 +1,1 @@
+"""Amazon product data retrieval."""

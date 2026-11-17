@@ -1,0 +1,1 @@
+"""Telegram offers bot application."""
