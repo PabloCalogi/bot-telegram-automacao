@@ -1,11 +1,9 @@
 import unittest
-from io import BytesIO
 from unittest.mock import patch
 
-import requests
+from curl_cffi import requests
 
 from app.amazon.client import (
-    USER_AGENT,
     AmazonAccessBlocked,
     AmazonProductParseError,
     AmazonScrapingError,
@@ -20,7 +18,7 @@ PRODUCT_HTML = """
     <span class="priceToPay"><span class="a-offscreen">R$ 89,90</span></span>
     <span class="basisPrice"><span class="a-offscreen">R$ 119,90</span></span>
   </div>
-  <img id="landingImage" src="/images/product.jpg">
+  <span id="landingImage" src="/images/product.jpg">Imagem do produto</span>
 </html>
 """
 
@@ -29,15 +27,13 @@ def make_response(status_code: int, html: str = "") -> requests.Response:
     response = requests.Response()
     response.status_code = status_code
     response.url = "https://www.amazon.com.br/dp/B000000001"
-    response._content = html.encode("utf-8")
-    response.encoding = "utf-8"
-    response.raw = BytesIO()
+    response._text = html
     return response
 
 
 class AmazonClientTests(unittest.TestCase):
     @patch("app.amazon.client.requests.get")
-    def test_fetch_product_extracts_fields_with_only_fixed_user_agent(self, get):
+    def test_fetch_product_extracts_fields_with_chrome_impersonation(self, get):
         get.return_value = make_response(200, PRODUCT_HTML)
 
         product = fetch_product("B000000001")
@@ -53,9 +49,9 @@ class AmazonClientTests(unittest.TestCase):
         self.assertEqual(product.source_url, "https://www.amazon.com.br/dp/B000000001")
         self.assertEqual(
             get.call_args.kwargs["headers"],
-            {"User-Agent": USER_AGENT},
+            {"Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"},
         )
-        self.assertIn("Chrome/", USER_AGENT)
+        self.assertEqual(get.call_args.kwargs["impersonate"], "chrome120")
         self.assertFalse(get.call_args.kwargs["allow_redirects"])
 
     @patch("app.amazon.client.requests.get")
