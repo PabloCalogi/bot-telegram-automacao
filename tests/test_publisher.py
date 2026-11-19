@@ -82,14 +82,21 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first_result)
         self.assertFalse(duplicate_result)
         bot.send_message.assert_awaited_once()
-        message = bot.send_message.await_args.kwargs["text"]
-        self.assertIn("R$ 100,00", message)
-        self.assertIn("✅ Por: R$ <b>80,00</b>", message)
-        self.assertIn("🔥 Desconto de: <b>20,00%</b>", message)
-        self.assertIn("tag=exemplo-20", message)
+        send_args = bot.send_message.await_args.kwargs
+        message = send_args["text"]
+        self.assertIn(
+            '<a href="https://www.amazon.com.br/dp/B000000001?tag=exemplo-20">'
+            "&#8205;</a>🧙‍♂️ <b>OFERTA DO MAGO</b> 🔥 <b>20% OFF</b>",
+            message,
+        )
+        self.assertIn("<s>R$ 100,00</s>", message)
+        self.assertIn("💸 <b>R$ 80,00</b>", message)
+        self.assertEqual(send_args["parse_mode"], "HTML")
+        button = send_args["reply_markup"].inline_keyboard[0][0]
+        self.assertEqual(button.text, "🛒 Ver oferta na Amazon")
         self.assertEqual(
-            bot.send_message.await_args.kwargs["parse_mode"],
-            "HTML",
+            button.url,
+            "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
         )
 
     async def test_uses_photo_when_product_image_is_available(self):
@@ -109,7 +116,13 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
 
         bot.send_photo.assert_awaited_once()
         bot.send_message.assert_not_awaited()
-        self.assertEqual(bot.send_photo.await_args.kwargs["parse_mode"], "HTML")
+        send_args = bot.send_photo.await_args.kwargs
+        self.assertEqual(send_args["parse_mode"], "HTML")
+        self.assertNotIn("<a href=", send_args["caption"])
+        self.assertEqual(
+            send_args["reply_markup"].inline_keyboard[0][0].url,
+            "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
+        )
 
     async def test_does_not_publish_discount_at_threshold(self):
         product = make_product(current_price=Decimal("85"))
@@ -175,14 +188,22 @@ class PublisherFormattingTests(unittest.TestCase):
             "https://www.amazon.com.br/dp/B000000001?tag=afiliado-20",
         )
 
-        self.assertIn("<b>🚨 OFERTA DETECTADA! 🚨</b>", message)
-        self.assertIn("✅ Por: R$ <b>80,00</b>", message)
-        self.assertIn("🔥 Desconto de: <b>20,00%</b>", message)
         self.assertIn(
-            "🛒 Compre aqui: https://www.amazon.com.br/dp/"
-            "B000000001?tag=afiliado-20",
+            "🧙‍♂️ <b>OFERTA DO MAGO</b> 🔥 <b>20% OFF</b>",
             message,
         )
+        self.assertIn("<s>R$ 100,00</s>", message)
+        self.assertIn("💸 <b>R$ 80,00</b>", message)
+
+    def test_rounds_discount_to_an_integer_and_keeps_brazilian_prices(self):
+        product = make_product(current_price=Decimal("74.50"))
+        analysis = analyze_discount(product, Decimal("15"))
+
+        message = format_offer_message(product, analysis, "https://example.test")
+
+        self.assertIn("<b>26% OFF</b>", message)
+        self.assertIn("<s>R$ 100,00</s>", message)
+        self.assertIn("💸 <b>R$ 74,50</b>", message)
 
     def test_escapes_dynamic_fields_for_html_parse_mode(self):
         product = Product(
@@ -199,10 +220,15 @@ class PublisherFormattingTests(unittest.TestCase):
             product,
             analysis,
             "https://www.amazon.com.br/dp/B000000001?tag=afiliado-20&ref=teste",
+            include_hidden_link=True,
         )
 
         self.assertIn("Produto &lt;especial&gt; &amp; único", message)
-        self.assertIn("&amp;ref=teste", message)
+        self.assertIn(
+            '<a href="https://www.amazon.com.br/dp/B000000001?tag=afiliado-20&amp;'
+            'ref=teste">&#8205;</a>',
+            message,
+        )
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ import re
 from decimal import Decimal, ROUND_HALF_UP
 from urllib.parse import urlencode
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 from app.amazon.client import (
@@ -44,6 +44,8 @@ def format_offer_message(
     product: Product,
     analysis: DiscountAnalysis,
     affiliate_url: str,
+    *,
+    include_hidden_link: bool = False,
 ) -> str:
     if (
         not analysis.approved
@@ -55,22 +57,21 @@ def format_offer_message(
     title = " ".join(product.title.split())
     if len(title) > 300:
         title = title[:297] + "..."
-    discount = analysis.discount_percent.quantize(
-        Decimal("0.01"),
-        rounding=ROUND_HALF_UP,
+    discount = analysis.discount_percent.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    hidden_link = (
+        f'<a href="{html.escape(affiliate_url)}">&#8205;</a>'
+        if include_hidden_link
+        else ""
     )
 
     return "\n".join(
         (
-            "<b>🚨 OFERTA DETECTADA! 🚨</b>",
+            f"{hidden_link}🧙‍♂️ <b>OFERTA DO MAGO</b> 🔥 <b>{discount}% OFF</b>",
             "",
             html.escape(title),
             "",
-            f"❌ De: R$ {_format_brl(product.original_price)}",
-            f"✅ Por: R$ <b>{_format_brl(product.current_price)}</b>",
-            f"🔥 Desconto de: <b>{str(discount).replace('.', ',')}%</b>",
-            "",
-            f"🛒 Compre aqui: {html.escape(affiliate_url)}",
+            f"<s>R$ {_format_brl(product.original_price)}</s>",
+            f"💸 <b>R$ {_format_brl(product.current_price)}</b>",
         )
     )
 
@@ -91,19 +92,30 @@ async def process_product(
         return False
 
     affiliate_url = build_affiliate_url(product.asin, settings.amazon_associate_tag)
-    message = format_offer_message(product, analysis, affiliate_url)
-    if product.image_url:
+    has_image = bool(product.image_url)
+    message = format_offer_message(
+        product,
+        analysis,
+        affiliate_url,
+        include_hidden_link=not has_image,
+    )
+    reply_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🛒 Ver oferta na Amazon", url=affiliate_url)]]
+    )
+    if has_image:
         await bot.send_photo(
             chat_id=settings.telegram_channel_id,
             photo=product.image_url,
             caption=message,
             parse_mode="HTML",
+            reply_markup=reply_markup,
         )
     else:
         await bot.send_message(
             chat_id=settings.telegram_channel_id,
             text=message,
             parse_mode="HTML",
+            reply_markup=reply_markup,
         )
 
     if not store.record_sent(product.asin):
