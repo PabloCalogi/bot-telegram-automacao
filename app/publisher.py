@@ -72,6 +72,8 @@ def format_offer_message(
             "",
             f"<s>R$ {_format_brl(product.original_price)}</s>",
             f"💸 <b>R$ {_format_brl(product.current_price)}</b>",
+            "",
+            "<i>*Preço e disponibilidade sujeitos a alteração.</i>",
         )
     )
 

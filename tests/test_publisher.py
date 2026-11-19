@@ -91,6 +91,11 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("<s>R$ 100,00</s>", message)
         self.assertIn("💸 <b>R$ 80,00</b>", message)
+        self.assertTrue(
+            message.endswith(
+                "\n\n<i>*Preço e disponibilidade sujeitos a alteração.</i>"
+            )
+        )
         self.assertEqual(send_args["parse_mode"], "HTML")
         button = send_args["reply_markup"].inline_keyboard[0][0]
         self.assertEqual(button.text, "🛒 Ver oferta na Amazon")
@@ -119,6 +124,11 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         send_args = bot.send_photo.await_args.kwargs
         self.assertEqual(send_args["parse_mode"], "HTML")
         self.assertNotIn("<a href=", send_args["caption"])
+        self.assertTrue(
+            send_args["caption"].endswith(
+                "\n\n<i>*Preço e disponibilidade sujeitos a alteração.</i>"
+            )
+        )
         self.assertEqual(
             send_args["reply_markup"].inline_keyboard[0][0].url,
             "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
