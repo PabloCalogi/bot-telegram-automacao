@@ -7,46 +7,40 @@
 B0GVT89H5W
 B0D9KL3T8S
 
-# --- TECH & GAMER ---
+# --- TECH, CASA INTELIGENTE & GAMER ---
 B09B8XVSDP # Echo Dot branco
 B0DKLQT9XR # Echo Dot Max grafite
+B082FTRR76 # Smart Lâmpada Wi-Fi Positivo Casa Inteligente 9W
+B07S14JHF2 # Smart Plug Wi-Fi 10A Positivo Casa Inteligente
+B0CNH9WK1H # Power Bank Geonav Universal 10.000 mAh
+B0CNHBV6W5 # Power Bank Geonav Compacto 20.000 mAh
+B074L9L5KZ # Mouse sem fio Logitech M170
+B09C1K95LB # Fone Bluetooth QCY T13
 B0GR11L1VP # Fone JBL Tune 730BT preto
 B0C7KBJ6CM # Mouse Redragon Invader Pro M719RGB-PRO
-B0DY1LGSHD # Capa magnética BEMMY para iPhone 15 preta
 B09C4T66X3 # Gran Turismo 7 Edição Padrão - PS5
 B0CNWP4C78 # Tekken 8 - PS5
-B0H6KT2RWH # Grand Theft Auto VI - PlayStation 5
 
-# --- CASA & COZINHA ---
+# --- CASA & COZINHA (110V/127V ou sem voltagem) ---
 B0DD1KD5JP # Airfryer forno Philips Walita 12 L (110 V)
 B0BYK9KP3W # Airfryer forno Electrolux EAF90 12 L (127 V)
-B09N5G6DGX # Cafeteira Mondial Dolce Arome (220 V)
-B0941752F2 # Cafeteira Oster com jarra inox 1,2 L (220 V)
-B08DFJRCJB # Liquidificador Oster 1400 Full 3,2 L (220 V)
-B097KQWJKZ # Mixer Britânia BMX400 3 em 1 (220 V)
-B0CH5PTDY1 # Chaleira elétrica WAP WCE1 1,7 L (220 V)
-B075TGQVHT # Chaleira elétrica Agratto inox 1,8 L (220 V)
 B09ZKP7HBB # Aspirador portátil Black+Decker APB12000
-B0DCW6N6WK # Ventilador circulador Britânia BCA25A (220 V)
 B0C3Q7152B # Luminária articulada Luminatti Pixar preta
 B0G16LDLGZ # Espelho orgânico Lopazzi 90 x 40 cm
 B0GMY4QYJY # Kit 2 potes herméticos de 1,5 L
 B0CPTD7WH3 # Organizador de gavetas Acrimet (kit com 10 potes)
 
 # --- FERRAMENTAS & AUTO ---
-B09TBBXC2Z # Compressor de ar Vonder CAV 150
 B09TB998J3 # Parafusadeira e furadeira Vonder PFV 120 (12 V)
 
-# --- ESPORTES, MODA & SUPLEMENTOS ---
-B0FFTRNDDD # Tênis Mizuno Cool Ride 3 branco/preto (43)
-B0F2JBQT4D # Tênis Puma Flyer Lite 3 preto (39)
-B0B43SRKS6 # Chuteira Topper Dominator 3 LT (42)
-B0DQ5VW5G3 # Bola Puma Cumbre Libertadores Hybrid
+# --- ESPORTES & SUPLEMENTOS ---
+B07L5WFHXW # Creatina Integralmédica Hardcore 300 g
 B0DXLH4V8V # Whey Vitafor WPC 900 g morango
+B0DQ5VW5G3 # Bola Puma Cumbre Libertadores Hybrid
 
 # --- CUIDADOS PESSOAIS & BELEZA ---
+B0CTR4FL63 # Protetor Solar Facial Principia PS-01 FPS 60 (40 ml)
 B0DSLQCPMD # Proteína capilar Lola Ela é Carioca 90 ml
 
 # --- BRINQUEDOS & LAZER ---
-B0CGXZQYMV # LEGO Technic Mercedes-AMG F1 42171
 B0FSF29J85 # Kit de raquetes de velcro com bola TYDA
