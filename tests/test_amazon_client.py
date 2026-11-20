@@ -1,12 +1,14 @@
 import unittest
 from unittest.mock import patch
 
+from bs4 import BeautifulSoup
 from curl_cffi import requests
 
 from app.amazon.client import (
     AmazonAccessBlocked,
     AmazonProductParseError,
     AmazonScrapingError,
+    _get_image_url,
     fetch_product,
 )
 
@@ -29,6 +31,14 @@ def make_response(status_code: int, html: str = "") -> requests.Response:
     response.url = "https://www.amazon.com.br/dp/B000000001"
     response._text = html
     return response
+
+
+def extract_image_url(html: str) -> str | None:
+    return _get_image_url(
+        BeautifulSoup(html, "html.parser"),
+        "https://www.amazon.com.br/dp/B000000001",
+        html,
+    )
 
 
 class AmazonClientTests(unittest.TestCase):
@@ -111,6 +121,71 @@ class AmazonClientTests(unittest.TestCase):
 
         self.assertIsNone(product.original_price)
         self.assertIsNone(product.image_url)
+
+    def test_prefers_landing_image_hires_then_largest_dynamic_then_src(self):
+        html = """
+        <img id="landingImage"
+             data-old-hires="https://images.example.test/high.jpg"
+             data-a-dynamic-image='{"https://images.example.test/small.jpg":[200,200],
+                                   "https://images.example.test/large.jpg":[1200,1200]}'
+             src="https://images.example.test/thumbnail.jpg">
+        """
+        self.assertEqual(
+            extract_image_url(html),
+            "https://images.example.test/high.jpg",
+        )
+
+        html = """
+        <img id="landingImage"
+             data-a-dynamic-image='{"https://images.example.test/small.jpg":[200,200],
+                                   "https://images.example.test/large.jpg":[1200,1200]}'
+             src="https://images.example.test/thumbnail.jpg">
+        """
+        self.assertEqual(
+            extract_image_url(html),
+            "https://images.example.test/large.jpg",
+        )
+
+    def test_falls_back_to_book_images_and_ignores_placeholder_urls(self):
+        for selector in ("imgBlkFront", "ebooksImgBlkFront"):
+            with self.subTest(selector=selector):
+                html = f"""
+                <img id="landingImage"
+                     src="https://images.example.test/transparent-pixel.gif">
+                <img id="{selector}"
+                     data-old-hires="https://images.example.test/book.jpg">
+                """
+                self.assertEqual(
+                    extract_image_url(html),
+                    "https://images.example.test/book.jpg",
+                )
+
+    def test_falls_back_to_open_graph_image(self):
+        html = """
+        <meta property="og:image" content="/images/open-graph.jpg">
+        """
+        self.assertEqual(
+            extract_image_url(html),
+            "https://www.amazon.com.br/images/open-graph.jpg",
+        )
+
+    def test_falls_back_to_hires_or_large_image_data_in_html(self):
+        for key in ("hiRes", "large"):
+            with self.subTest(key=key):
+                html = (
+                    f'<script>var image = {{"{key}":'
+                    '"https://images.example.test/from-json.jpg"};</script>'
+                )
+                self.assertEqual(
+                    extract_image_url(html),
+                    "https://images.example.test/from-json.jpg",
+                )
+
+    def test_rejects_non_http_and_transparent_pixel_images(self):
+        html = """
+        <img id="landingImage" src="data:image/gif;base64,R0lGODlhAQABAAD/">
+        """
+        self.assertIsNone(extract_image_url(html))
 
     @patch("app.amazon.client.requests.get")
     def test_rejects_urls_outside_amazon_brazil_before_request(self, get):

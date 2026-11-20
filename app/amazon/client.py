@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urljoin, urlparse
 
 from curl_cffi import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from app.amazon.models import Product
 
@@ -35,7 +35,22 @@ ORIGINAL_PRICE_SELECTORS = (
     "#corePriceDisplay_desktop_feature_div .a-text-price .a-offscreen",
     "#priceblock_listprice",
 )
-IMAGE_SELECTORS = ("#landingImage", "#imgBlkFront", "#main-image-container img")
+BOOK_IMAGE_SELECTORS = (
+    "#imgBlkFront",
+    "#ebooksImgBlkFront",
+)
+LEGACY_IMAGE_SELECTORS = ("#main-image-container img",)
+IMAGE_DATA_PATTERN = re.compile(
+    r'"(?:hiRes|large)"\s*:\s*"(https://[^"]+)"',
+    re.IGNORECASE,
+)
+PLACEHOLDER_IMAGE_MARKERS = (
+    "transparent",
+    "pixel",
+    "placeholder",
+    "spacer.gif",
+    "blank.gif",
+)
 
 
 class AmazonScrapingError(Exception):
@@ -132,30 +147,120 @@ def _parse_brl_price(text: str) -> Decimal:
         raise AmazonProductParseError("O preço encontrado é inválido.") from exc
 
 
-def _get_image_url(soup: BeautifulSoup, page_url: str) -> str | None:
-    image = _first_element(soup, IMAGE_SELECTORS)
-    if image is None:
-        logger.warning("Tag de imagem do produto não encontrada.")
+def _validated_image_url(image_url: str | None, page_url: str) -> str | None:
+    if not image_url:
         return None
 
-    image_url = (
-        image.get("data-old-hires")
-        or image.get("src")
-    )
-    if not image_url:
-        dynamic_images = image.get("data-a-dynamic-image")
-        if dynamic_images:
+    resolved_url = urljoin(page_url, image_url.strip())
+    parsed_url = urlparse(resolved_url)
+    if (
+        parsed_url.scheme.lower() not in ("http", "https")
+        or not parsed_url.netloc
+        or any(
+            marker in parsed_url.path.casefold()
+            for marker in PLACEHOLDER_IMAGE_MARKERS
+        )
+    ):
+        return None
+    return resolved_url
+
+
+def _dynamic_image_urls(image: Tag) -> list[str]:
+    dynamic_images = image.get("data-a-dynamic-image")
+    if not dynamic_images:
+        return []
+
+    try:
+        image_data = json.loads(dynamic_images)
+    except json.JSONDecodeError:
+        logger.warning("Atributo de imagens dinâmicas não pôde ser interpretado.")
+        return []
+
+    if not isinstance(image_data, dict):
+        return []
+
+    resolutions = []
+    for image_url, dimensions in image_data.items():
+        if not isinstance(image_url, str):
+            continue
+        if not isinstance(dimensions, (list, tuple)) or len(dimensions) < 2:
+            resolution = 0
+        else:
             try:
-                image_data = json.loads(dynamic_images)
-                if isinstance(image_data, dict):
-                    image_url = next(iter(image_data), None)
-            except json.JSONDecodeError:
-                logger.warning("Atributo de imagens dinâmicas não pôde ser interpretado.")
+                resolution = float(dimensions[0]) * float(dimensions[1])
+            except (OverflowError, TypeError, ValueError):
+                resolution = 0
+        resolutions.append((resolution, image_url))
+    resolutions.sort(key=lambda item: item[0], reverse=True)
+    return [image_url for _, image_url in resolutions]
 
-    if not image_url:
-        logger.warning("A tag de imagem não contém um endereço utilizável.")
-        return None
-    return urljoin(page_url, image_url)
+
+def _image_element_candidates(image: Tag) -> list[str | None]:
+    return [
+        image.get("data-old-hires"),
+        *_dynamic_image_urls(image),
+        image.get("src"),
+    ]
+
+
+def _first_valid_image_url(
+    candidates: list[str | None],
+    page_url: str,
+) -> str | None:
+    for candidate in candidates:
+        image_url = _validated_image_url(candidate, page_url)
+        if image_url is not None:
+            return image_url
+    return None
+
+
+def _get_image_url(
+    soup: BeautifulSoup,
+    page_url: str,
+    page_html: str,
+) -> str | None:
+    landing_image = soup.select_one("#landingImage")
+    if landing_image is not None:
+        image_url = _first_valid_image_url(
+            _image_element_candidates(landing_image),
+            page_url,
+        )
+        if image_url is not None:
+            return image_url
+
+    for selector in BOOK_IMAGE_SELECTORS:
+        image = soup.select_one(selector)
+        if image is not None:
+            image_url = _first_valid_image_url(
+                _image_element_candidates(image),
+                page_url,
+            )
+            if image_url is not None:
+                return image_url
+
+    og_image = soup.select_one('meta[property="og:image"]')
+    if og_image is not None:
+        image_url = _validated_image_url(og_image.get("content"), page_url)
+        if image_url is not None:
+            return image_url
+
+    for match in IMAGE_DATA_PATTERN.finditer(page_html):
+        image_url = _validated_image_url(match.group(1), page_url)
+        if image_url is not None:
+            return image_url
+
+    for selector in LEGACY_IMAGE_SELECTORS:
+        image = soup.select_one(selector)
+        if image is not None:
+            image_url = _first_valid_image_url(
+                _image_element_candidates(image),
+                page_url,
+            )
+            if image_url is not None:
+                return image_url
+
+    logger.warning("Imagem do produto não encontrada ou inválida.")
+    return None
 
 
 def _parse_product(html: str, page_url: str, asin: str) -> Product:
@@ -191,7 +296,7 @@ def _parse_product(html: str, page_url: str, asin: str) -> Product:
         title=title,
         original_price=original_price,
         current_price=current_price,
-        image_url=_get_image_url(soup, page_url),
+        image_url=_get_image_url(soup, page_url, html),
         source_url=page_url,
     )
 

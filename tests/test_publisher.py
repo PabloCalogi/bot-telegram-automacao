@@ -4,12 +4,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
-from app.amazon.client import AmazonAccessBlocked
+from app.amazon.client import AmazonAccessBlocked, AmazonScrapingError
 from app.amazon.models import Product
 from app.config import Settings
 from app.deals import analyze_discount
-from app.main import send_test_message
+from app.main import main, send_test_message
 from app.publisher import (
+    ExecutionSummary,
     build_affiliate_url,
     format_offer_message,
     monitor_offers,
@@ -106,6 +107,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_uses_photo_when_product_image_is_available(self):
         product = make_product("https://images.example.test/product.jpg")
+        summary = ExecutionSummary()
         settings = Settings(
             telegram_bot_token="token",
             telegram_channel_id="@canal",
@@ -117,10 +119,17 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
             store.initialize()
             with patch("app.publisher.fetch_product", return_value=product):
-                await process_product("B000000001", bot, store, settings)
+                await process_product(
+                    "B000000001",
+                    bot,
+                    store,
+                    settings,
+                    summary=summary,
+                )
 
         bot.send_photo.assert_awaited_once()
         bot.send_message.assert_not_awaited()
+        self.assertEqual(summary.with_image, 1)
         send_args = bot.send_photo.await_args.kwargs
         self.assertEqual(send_args["parse_mode"], "HTML")
         self.assertNotIn("<a href=", send_args["caption"])
@@ -132,6 +141,81 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             send_args["reply_markup"].inline_keyboard[0][0].url,
             "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
+        )
+
+    async def test_monitor_returns_execution_counters(self):
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+            product_identifiers=("one", "two", "three"),
+        )
+        summary = ExecutionSummary()
+        with (
+            patch("app.publisher.Bot") as bot_class,
+            patch("app.publisher.SQLiteOfferStore") as store_class,
+            patch(
+                "app.publisher.process_product",
+                new_callable=AsyncMock,
+                side_effect=[
+                    True,
+                    False,
+                    AmazonScrapingError("consulta falhou"),
+                ],
+            ) as process_mock,
+        ):
+            bot_context = bot_class.return_value
+            bot_context.__aenter__ = AsyncMock(return_value=AsyncMock())
+            bot_context.__aexit__ = AsyncMock(return_value=False)
+
+            result = await monitor_offers(settings, run_once=True, summary=summary)
+
+        self.assertIs(result, summary)
+        self.assertEqual(summary.analyzed, 3)
+        self.assertEqual(summary.published, 1)
+        self.assertEqual(summary.ignored, 1)
+        self.assertEqual(summary.errors, 1)
+        self.assertEqual(process_mock.await_count, 3)
+        store_class.return_value.initialize.assert_called_once()
+
+    async def test_main_logs_summary_when_once_finishes(self):
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+        )
+        summary = ExecutionSummary(
+            analyzed=3,
+            with_image=1,
+            published=1,
+            ignored=1,
+            errors=1,
+        )
+
+        with (
+            patch("sys.argv", ["app.main", "--once"]),
+            patch("app.main.Settings.from_env", return_value=settings),
+            patch("app.main.ExecutionSummary", return_value=summary),
+            patch(
+                "app.main.monitor_offers",
+                new_callable=AsyncMock,
+            ) as monitor_offers_mock,
+            patch(
+                "app.main.asyncio.run",
+                side_effect=lambda coroutine: coroutine.close(),
+            ),
+            self.assertLogs("app.main", level="INFO") as logs,
+        ):
+            main()
+
+        monitor_offers_mock.assert_called_once_with(
+            settings,
+            run_once=True,
+            summary=summary,
+        )
+        self.assertIn(
+            "Resumo da execução | Analisados: 3 | Com imagem: 1 | Publicados: 1 | "
+            "Ignorados/Já enviados: 1 | Erros: 1",
+            logs.output[-1],
         )
 
     async def test_does_not_publish_discount_at_threshold(self):

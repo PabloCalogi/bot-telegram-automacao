@@ -13,15 +13,15 @@ jobs:
 
     steps:
       - name: Baixar código do repositório
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configurar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
       - name: Restaurar banco de ofertas (evita duplicatas)
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v6
         with:
           path: data/offers.sqlite3
           key: offers-db-${{ github.run_id }}
@@ -40,3 +40,10 @@ jobs:
           AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
           MIN_DISCOUNT_PERCENT: ${{ secrets.MIN_DISCOUNT_PERCENT }}
         run: python -m app.main --once
+
+      - name: Salvar banco de ofertas atualizado
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: data/offers.sqlite3
+          key: offers-db-${{ github.run_id }}

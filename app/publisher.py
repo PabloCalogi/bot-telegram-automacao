@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import re
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from urllib.parse import urlencode
 
@@ -22,6 +23,15 @@ from app.storage import SQLiteOfferStore
 logger = logging.getLogger(__name__)
 REQUEST_DELAY_SECONDS = 1
 ASIN_PATTERN = re.compile(r"^[A-Z0-9]{10}$", re.IGNORECASE)
+
+
+@dataclass
+class ExecutionSummary:
+    analyzed: int = 0
+    with_image: int = 0
+    published: int = 0
+    ignored: int = 0
+    errors: int = 0
 
 
 def build_affiliate_url(asin: str, associate_tag: str) -> str:
@@ -83,8 +93,12 @@ async def process_product(
     bot: Bot,
     store: SQLiteOfferStore,
     settings: Settings,
+    *,
+    summary: ExecutionSummary | None = None,
 ) -> bool:
     product = await asyncio.to_thread(fetch_product, identifier)
+    if summary is not None and product.image_url:
+        summary.with_image += 1
     analysis = analyze_discount(product, settings.min_discount_percent)
     if not analysis.approved:
         logger.info("Oferta descartada para ASIN %s: %s", product.asin, analysis.reason)
@@ -132,11 +146,15 @@ async def monitor_offers(
     settings: Settings,
     *,
     run_once: bool = False,
-) -> None:
+    summary: ExecutionSummary | None = None,
+) -> ExecutionSummary:
     if not settings.product_identifiers:
         raise ValueError("Configure PRODUCT_IDENTIFIERS no arquivo .env.")
     if not settings.amazon_associate_tag:
         raise ValueError("Configure AMAZON_ASSOCIATE_TAG no arquivo .env.")
+
+    if summary is None:
+        summary = ExecutionSummary()
 
     store = SQLiteOfferStore()
     store.initialize()
@@ -144,14 +162,28 @@ async def monitor_offers(
     async with Bot(token=settings.telegram_bot_token) as bot:
         while True:
             for identifier in settings.product_identifiers:
+                summary.analyzed += 1
                 try:
-                    await process_product(identifier, bot, store, settings)
+                    published = await process_product(
+                        identifier,
+                        bot,
+                        store,
+                        settings,
+                        summary=summary,
+                    )
+                    if published:
+                        summary.published += 1
+                    else:
+                        summary.ignored += 1
                 except AmazonAccessBlocked:
+                    summary.errors += 1
                     logger.error("Bloqueio da Amazon; interrompendo o monitoramento.")
                     raise
                 except AmazonScrapingError as exc:
+                    summary.errors += 1
                     logger.warning("Consulta ignorada para %s: %s", identifier, exc)
                 except TelegramError as exc:
+                    summary.errors += 1
                     logger.error(
                         "Erro do Telegram ao processar %s (%s).",
                         identifier,
@@ -160,5 +192,5 @@ async def monitor_offers(
                 await asyncio.sleep(REQUEST_DELAY_SECONDS)
 
             if run_once:
-                return
+                return summary
             await asyncio.sleep(settings.poll_interval_seconds)

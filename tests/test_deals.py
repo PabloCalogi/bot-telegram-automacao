@@ -73,8 +73,13 @@ class DealAnalysisTests(unittest.TestCase):
             ),
             "POLL_INTERVAL_SECONDS": "120",
         }
-        with patch.dict(os.environ, environment):
-            settings = Settings.from_env()
+        with TemporaryDirectory() as directory:
+            products_file = Path(directory) / "missing-products.txt"
+            with (
+                patch.dict(os.environ, environment),
+                patch("app.config.PRODUCTS_FILE", products_file),
+            ):
+                settings = Settings.from_env()
 
         self.assertEqual(settings.min_discount_percent, Decimal("12.5"))
         self.assertEqual(settings.amazon_associate_tag, "associado-20")
