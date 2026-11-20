@@ -4,6 +4,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
+from telegram.error import TelegramError
+
 from app.amazon.client import AmazonAccessBlocked, AmazonScrapingError
 from app.amazon.models import Product
 from app.config import Settings
@@ -85,18 +87,16 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         bot.send_message.assert_awaited_once()
         send_args = bot.send_message.await_args.kwargs
         message = send_args["text"]
-        self.assertIn(
-            '<a href="https://www.amazon.com.br/dp/B000000001?tag=exemplo-20">'
-            "&#8205;</a>🧙‍♂️ <b>OFERTA DO MAGO</b> 🔥 <b>20% OFF</b>",
+        self.assertEqual(
             message,
+            "🔥 <b>OFERTA NO CLUBE DO MAGO</b>\n\n"
+            "📦 <b>Produto de teste</b>\n\n"
+            "❌ De: <s>R$ 100,00</s>\n"
+            "✅ <b>Por: R$ 80,00</b>\n"
+            "📉 <b>20% OFF</b> (Economize R$ 20,00)\n\n"
+            "⚡ <i>Preço e estoque sujeitos a alteração pela Amazon.</i>",
         )
-        self.assertIn("<s>R$ 100,00</s>", message)
-        self.assertIn("💸 <b>R$ 80,00</b>", message)
-        self.assertTrue(
-            message.endswith(
-                "\n\n<i>*Preço e disponibilidade sujeitos a alteração.</i>"
-            )
-        )
+        self.assertNotIn("https://", message)
         self.assertEqual(send_args["parse_mode"], "HTML")
         button = send_args["reply_markup"].inline_keyboard[0][0]
         self.assertEqual(button.text, "🛒 Ver oferta na Amazon")
@@ -133,13 +133,56 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         send_args = bot.send_photo.await_args.kwargs
         self.assertEqual(send_args["parse_mode"], "HTML")
         self.assertNotIn("<a href=", send_args["caption"])
-        self.assertTrue(
-            send_args["caption"].endswith(
-                "\n\n<i>*Preço e disponibilidade sujeitos a alteração.</i>"
-            )
-        )
+        self.assertIn("📦 <b>Produto de teste</b>", send_args["caption"])
+        self.assertIn("(Economize R$ 20,00)", send_args["caption"])
         self.assertEqual(
             send_args["reply_markup"].inline_keyboard[0][0].url,
+            "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
+        )
+
+    async def test_falls_back_to_formatted_text_when_photo_send_fails(self):
+        product = make_product("https://images.example.test/rejected.jpg")
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = AsyncMock()
+        bot.send_photo.side_effect = TelegramError("foto rejeitada")
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    "B000000001",
+                    bot,
+                    store,
+                    settings,
+                )
+
+        self.assertTrue(result)
+        bot.send_photo.assert_awaited_once()
+        bot.send_message.assert_awaited_once()
+        photo_args = bot.send_photo.await_args.kwargs
+        message_args = bot.send_message.await_args.kwargs
+        self.assertEqual(photo_args["parse_mode"], "HTML")
+        self.assertEqual(message_args["parse_mode"], "HTML")
+        self.assertEqual(photo_args["caption"], message_args["text"])
+        self.assertEqual(
+            photo_args["reply_markup"].inline_keyboard[0][0].text,
+            "🛒 Ver oferta na Amazon",
+        )
+        self.assertEqual(
+            message_args["reply_markup"].inline_keyboard[0][0].text,
+            "🛒 Ver oferta na Amazon",
+        )
+        self.assertEqual(
+            photo_args["reply_markup"].inline_keyboard[0][0].url,
+            "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
+        )
+        self.assertEqual(
+            message_args["reply_markup"].inline_keyboard[0][0].url,
             "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
         )
 
@@ -276,28 +319,31 @@ class PublisherFormattingTests(unittest.TestCase):
         product = make_product()
         analysis = analyze_discount(product, Decimal("15"))
 
-        message = format_offer_message(
-            product,
-            analysis,
-            "https://www.amazon.com.br/dp/B000000001?tag=afiliado-20",
-        )
+        message = format_offer_message(product, analysis)
 
         self.assertIn(
-            "🧙‍♂️ <b>OFERTA DO MAGO</b> 🔥 <b>20% OFF</b>",
+            "🔥 <b>OFERTA NO CLUBE DO MAGO</b>\n\n"
+            "📦 <b>Produto de teste</b>",
             message,
         )
-        self.assertIn("<s>R$ 100,00</s>", message)
-        self.assertIn("💸 <b>R$ 80,00</b>", message)
+        self.assertIn("❌ De: <s>R$ 100,00</s>", message)
+        self.assertIn("✅ <b>Por: R$ 80,00</b>", message)
+        self.assertIn("📉 <b>20% OFF</b> (Economize R$ 20,00)", message)
+        self.assertTrue(
+            message.endswith(
+                "⚡ <i>Preço e estoque sujeitos a alteração pela Amazon.</i>"
+            )
+        )
 
     def test_rounds_discount_to_an_integer_and_keeps_brazilian_prices(self):
         product = make_product(current_price=Decimal("74.50"))
         analysis = analyze_discount(product, Decimal("15"))
 
-        message = format_offer_message(product, analysis, "https://example.test")
+        message = format_offer_message(product, analysis)
 
         self.assertIn("<b>26% OFF</b>", message)
         self.assertIn("<s>R$ 100,00</s>", message)
-        self.assertIn("💸 <b>R$ 74,50</b>", message)
+        self.assertIn("<b>Por: R$ 74,50</b>", message)
 
     def test_escapes_dynamic_fields_for_html_parse_mode(self):
         product = Product(
@@ -310,19 +356,28 @@ class PublisherFormattingTests(unittest.TestCase):
         )
         analysis = analyze_discount(product, Decimal("15"))
 
-        message = format_offer_message(
-            product,
-            analysis,
-            "https://www.amazon.com.br/dp/B000000001?tag=afiliado-20&ref=teste",
-            include_hidden_link=True,
-        )
+        message = format_offer_message(product, analysis)
 
         self.assertIn("Produto &lt;especial&gt; &amp; único", message)
-        self.assertIn(
-            '<a href="https://www.amazon.com.br/dp/B000000001?tag=afiliado-20&amp;'
-            'ref=teste">&#8205;</a>',
-            message,
+        self.assertNotIn("https://", message)
+
+    def test_truncates_long_titles_and_formats_large_savings_in_brl(self):
+        product = Product(
+            asin="B000000001",
+            title="Produto" * 20,
+            original_price=Decimal("2000"),
+            current_price=Decimal("765.50"),
+            image_url=None,
+            source_url="https://www.amazon.com.br/dp/B000000001",
         )
+        analysis = analyze_discount(product, Decimal("15"))
+
+        message = format_offer_message(product, analysis)
+
+        self.assertIn(f"📦 <b>{'Produto' * 16}Produ...</b>", message)
+        self.assertIn("❌ De: <s>R$ 2.000,00</s>", message)
+        self.assertIn("✅ <b>Por: R$ 765,50</b>", message)
+        self.assertIn("(Economize R$ 1.234,50)", message)
 
 
 if __name__ == "__main__":

@@ -53,9 +53,6 @@ def _format_brl(value: Decimal) -> str:
 def format_offer_message(
     product: Product,
     analysis: DiscountAnalysis,
-    affiliate_url: str,
-    *,
-    include_hidden_link: bool = False,
 ) -> str:
     if (
         not analysis.approved
@@ -65,25 +62,23 @@ def format_offer_message(
         raise ValueError("Não é possível formatar um produto não aprovado como oferta.")
 
     title = " ".join(product.title.split())
-    if len(title) > 300:
-        title = title[:297] + "..."
+    if len(title) > 120:
+        title = title[:117] + "..."
     discount = analysis.discount_percent.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    hidden_link = (
-        f'<a href="{html.escape(affiliate_url)}">&#8205;</a>'
-        if include_hidden_link
-        else ""
-    )
+    saved_amount = product.original_price - product.current_price
 
     return "\n".join(
         (
-            f"{hidden_link}🧙‍♂️ <b>OFERTA DO MAGO</b> 🔥 <b>{discount}% OFF</b>",
+            "🔥 <b>OFERTA NO CLUBE DO MAGO</b>",
             "",
-            html.escape(title),
+            f"📦 <b>{html.escape(title)}</b>",
             "",
-            f"<s>R$ {_format_brl(product.original_price)}</s>",
-            f"💸 <b>R$ {_format_brl(product.current_price)}</b>",
+            f"❌ De: <s>R$ {_format_brl(product.original_price)}</s>",
+            f"✅ <b>Por: R$ {_format_brl(product.current_price)}</b>",
+            f"📉 <b>{discount}% OFF</b> "
+            f"(Economize R$ {_format_brl(saved_amount)})",
             "",
-            "<i>*Preço e disponibilidade sujeitos a alteração.</i>",
+            "⚡ <i>Preço e estoque sujeitos a alteração pela Amazon.</i>",
         )
     )
 
@@ -109,24 +104,27 @@ async def process_product(
 
     affiliate_url = build_affiliate_url(product.asin, settings.amazon_associate_tag)
     has_image = bool(product.image_url)
-    message = format_offer_message(
-        product,
-        analysis,
-        affiliate_url,
-        include_hidden_link=not has_image,
-    )
+    message = format_offer_message(product, analysis)
     reply_markup = InlineKeyboardMarkup(
         [[InlineKeyboardButton("🛒 Ver oferta na Amazon", url=affiliate_url)]]
     )
     if has_image:
-        await bot.send_photo(
-            chat_id=settings.telegram_channel_id,
-            photo=product.image_url,
-            caption=message,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-        )
-    else:
+        try:
+            await bot.send_photo(
+                chat_id=settings.telegram_channel_id,
+                photo=product.image_url,
+                caption=message,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except TelegramError as exc:
+            logger.warning(
+                "Falha ao enviar foto da oferta de ASIN %s (%s); usando texto.",
+                product.asin,
+                type(exc).__name__,
+            )
+            has_image = False
+    if not has_image:
         await bot.send_message(
             chat_id=settings.telegram_channel_id,
             text=message,
