@@ -2,9 +2,9 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError
 
 from app.amazon.client import AmazonAccessBlocked, AmazonScrapingError
 from app.amazon.models import Product
@@ -13,6 +13,7 @@ from app.deals import analyze_discount
 from app.main import main, send_test_message
 from app.publisher import (
     ExecutionSummary,
+    PUBLISH_DELAY_SECONDS,
     build_affiliate_url,
     format_offer_message,
     monitor_offers,
@@ -36,6 +37,14 @@ def make_product(
 
 
 class PublisherTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.sleep_patcher = patch(
+            "app.publisher.asyncio.sleep",
+            new_callable=AsyncMock,
+        )
+        self.sleep_mock = self.sleep_patcher.start()
+        self.addCleanup(self.sleep_patcher.stop)
+
     async def test_test_message_sends_to_numeric_telegram_chat_id(self):
         settings = Settings(
             telegram_bot_token="token",
@@ -139,6 +148,112 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             send_args["reply_markup"].inline_keyboard[0][0].url,
             "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
         )
+
+    async def test_retries_photo_after_retry_after(self):
+        product = make_product("https://images.example.test/product.jpg")
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = AsyncMock()
+        bot.send_photo.side_effect = [RetryAfter(2), None]
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    "B000000001",
+                    bot,
+                    store,
+                    settings,
+                )
+
+        self.assertTrue(result)
+        self.assertEqual(bot.send_photo.await_count, 2)
+        bot.send_message.assert_not_awaited()
+        self.assertEqual(
+            self.sleep_mock.await_args_list,
+            [call(3), call(PUBLISH_DELAY_SECONDS)],
+        )
+
+    async def test_retries_fallback_message_after_retry_after(self):
+        product = make_product("https://images.example.test/rejected.jpg")
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = AsyncMock()
+        bot.send_photo.side_effect = TelegramError("foto rejeitada")
+        bot.send_message.side_effect = [RetryAfter(4), None]
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    "B000000001",
+                    bot,
+                    store,
+                    settings,
+                )
+
+        self.assertTrue(result)
+        bot.send_photo.assert_awaited_once()
+        self.assertEqual(bot.send_message.await_count, 2)
+        self.assertEqual(
+            self.sleep_mock.await_args_list,
+            [call(5), call(PUBLISH_DELAY_SECONDS)],
+        )
+
+    async def test_waits_after_each_successful_publication(self):
+        products = (
+            make_product(),
+            Product(
+                asin="B000000002",
+                title="Segundo produto",
+                original_price=Decimal("100"),
+                current_price=Decimal("80"),
+                image_url=None,
+                source_url="https://www.amazon.com.br/dp/B000000002",
+            ),
+        )
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = AsyncMock()
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            with patch("app.publisher.fetch_product", side_effect=products):
+                first_result = await process_product(
+                    "B000000001",
+                    bot,
+                    store,
+                    settings,
+                )
+                second_result = await process_product(
+                    "B000000002",
+                    bot,
+                    store,
+                    settings,
+                )
+
+        self.assertTrue(first_result)
+        self.assertTrue(second_result)
+        self.assertEqual(
+            self.sleep_mock.await_args_list,
+            [
+                call(PUBLISH_DELAY_SECONDS),
+                call(PUBLISH_DELAY_SECONDS),
+            ],
+        )
+        self.assertEqual(bot.send_message.await_count, 2)
 
     async def test_falls_back_to_formatted_text_when_photo_send_fails(self):
         product = make_product("https://images.example.test/rejected.jpg")

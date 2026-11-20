@@ -7,7 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from urllib.parse import urlencode
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError
 
 from app.amazon.client import (
     AmazonAccessBlocked,
@@ -22,6 +22,7 @@ from app.storage import SQLiteOfferStore
 
 logger = logging.getLogger(__name__)
 REQUEST_DELAY_SECONDS = 1
+PUBLISH_DELAY_SECONDS = 3.0
 ASIN_PATTERN = re.compile(r"^[A-Z0-9]{10}$", re.IGNORECASE)
 
 
@@ -109,29 +110,52 @@ async def process_product(
         [[InlineKeyboardButton("🛒 Ver oferta na Amazon", url=affiliate_url)]]
     )
     if has_image:
+        for attempt in range(2):
+            try:
+                await bot.send_photo(
+                    chat_id=settings.telegram_channel_id,
+                    photo=product.image_url,
+                    caption=message,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+                break
+            except RetryAfter as exc:
+                if attempt == 1:
+                    logger.warning(
+                        "Falha ao enviar foto da oferta de ASIN %s (%s); usando texto.",
+                        product.asin,
+                        type(exc).__name__,
+                    )
+                    has_image = False
+                    break
+                await asyncio.sleep(exc.retry_after + 1)
+            except TelegramError as exc:
+                logger.warning(
+                    "Falha ao enviar foto da oferta de ASIN %s (%s); usando texto.",
+                    product.asin,
+                    type(exc).__name__,
+                )
+                has_image = False
+                break
+    if not has_image:
         try:
-            await bot.send_photo(
+            await bot.send_message(
                 chat_id=settings.telegram_channel_id,
-                photo=product.image_url,
-                caption=message,
+                text=message,
                 parse_mode="HTML",
                 reply_markup=reply_markup,
             )
-        except TelegramError as exc:
-            logger.warning(
-                "Falha ao enviar foto da oferta de ASIN %s (%s); usando texto.",
-                product.asin,
-                type(exc).__name__,
+        except RetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 1)
+            await bot.send_message(
+                chat_id=settings.telegram_channel_id,
+                text=message,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
             )
-            has_image = False
-    if not has_image:
-        await bot.send_message(
-            chat_id=settings.telegram_channel_id,
-            text=message,
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-        )
 
+    await asyncio.sleep(PUBLISH_DELAY_SECONDS)
     if not store.record_sent(product.asin):
         raise RuntimeError(
             f"ASIN {product.asin} já estava registrado após uma publicação no Telegram."
