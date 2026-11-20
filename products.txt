@@ -1,0 +1,20 @@
+# ==========================================
+# LISTA DE PRODUTOS - CLUBE DO MAGO
+# Formato: ASIN # Nome ou observação
+# ==========================================
+
+# --- ATUAIS (Publicados no canal) ---
+B0GVT89H5W
+B0D9KL3T8S
+
+# --- TECH & GAMER ---
+# (Ex: mouses, headsets, SSDs, controles, Echo Dot, Fire TV)
+
+# --- CASA & COZINHA ---
+# (Ex: air fryers, cafeteiras, aspiradores, lâmpadas smart)
+
+# --- LIVROS, MANGÁS & HQS ---
+# (Ex: box de livros, mangás populares, Kindle)
+
+# --- DIA A DIA & CUIDADOS PESSOAIS ---
+# (Ex: garrafas térmicas, suplementos, perfumes, kits)

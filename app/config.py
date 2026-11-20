@@ -2,8 +2,27 @@ import os
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+
+PRODUCTS_FILE = Path(__file__).resolve().parent.parent / "products.txt"
+
+
+def _read_products_file() -> tuple[str, ...]:
+    if not PRODUCTS_FILE.is_file():
+        return ()
+
+    identifiers = []
+    seen = set()
+    with PRODUCTS_FILE.open(encoding="utf-8-sig") as products_file:
+        for line in products_file:
+            identifier = line.split("#", 1)[0].strip()
+            if identifier and identifier not in seen:
+                identifiers.append(identifier)
+                seen.add(identifier)
+    return tuple(identifiers)
 
 
 @dataclass(frozen=True)
@@ -54,13 +73,15 @@ class Settings:
         if poll_interval_seconds < 60:
             raise ValueError("POLL_INTERVAL_SECONDS deve ser de pelo menos 60.")
 
-        product_identifiers = tuple(
-            item.strip()
-            for item in re.split(
-                r"[,\r\n]+", os.getenv("PRODUCT_IDENTIFIERS", "")
+        product_identifiers = _read_products_file()
+        if not product_identifiers:
+            product_identifiers = tuple(
+                item.strip()
+                for item in re.split(
+                    r"[,\r\n]+", os.getenv("PRODUCT_IDENTIFIERS", "")
+                )
+                if item.strip()
             )
-            if item.strip()
-        )
 
         return cls(
             telegram_bot_token=values["TELEGRAM_BOT_TOKEN"],

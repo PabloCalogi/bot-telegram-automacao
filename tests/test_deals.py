@@ -1,6 +1,8 @@
 import os
 import unittest
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from app.amazon.models import Product
@@ -85,6 +87,61 @@ class DealAnalysisTests(unittest.TestCase):
             ),
         )
         self.assertEqual(settings.poll_interval_seconds, 120)
+
+    def test_loads_products_file_ignoring_comments_blanks_and_duplicates(self):
+        products = (
+            "# produtos para monitorar\n"
+            "\n"
+            "  B0D9KL3T8S # Nome do produto\n"
+            "B000000002\n"
+            "  B0D9KL3T8S # duplicado\n"
+            "   # comentário sem produto\n"
+            "B000000003\n"
+        )
+        environment = {
+            "TELEGRAM_BOT_TOKEN": "test-token",
+            "TELEGRAM_CHANNEL_ID": "@test-channel",
+            "PRODUCT_IDENTIFIERS": "B000000004",
+        }
+
+        with TemporaryDirectory() as directory:
+            products_file = Path(directory) / "products.txt"
+            products_file.write_text(products, encoding="utf-8")
+            with (
+                patch("app.config.load_dotenv"),
+                patch.dict(os.environ, environment, clear=True),
+                patch("app.config.PRODUCTS_FILE", products_file),
+            ):
+                settings = Settings.from_env()
+
+        self.assertEqual(
+            settings.product_identifiers,
+            ("B0D9KL3T8S", "B000000002", "B000000003"),
+        )
+
+    def test_falls_back_to_environment_when_products_file_is_missing_or_empty(self):
+        environment = {
+            "TELEGRAM_BOT_TOKEN": "test-token",
+            "TELEGRAM_CHANNEL_ID": "@test-channel",
+            "PRODUCT_IDENTIFIERS": "B000000001, B000000002",
+        }
+
+        with TemporaryDirectory() as directory:
+            products_file = Path(directory) / "products.txt"
+            for content in (None, ""):
+                with self.subTest(content=content):
+                    if content is not None:
+                        products_file.write_text(content, encoding="utf-8")
+                    with (
+                        patch("app.config.load_dotenv"),
+                        patch.dict(os.environ, environment, clear=True),
+                        patch("app.config.PRODUCTS_FILE", products_file),
+                    ):
+                        settings = Settings.from_env()
+                    self.assertEqual(
+                        settings.product_identifiers,
+                        ("B000000001", "B000000002"),
+                    )
 
     def test_rejects_poll_intervals_under_one_minute(self):
         environment = {
