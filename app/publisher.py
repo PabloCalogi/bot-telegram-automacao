@@ -4,10 +4,11 @@ import logging
 import re
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
+from enum import Enum
 from urllib.parse import urlencode
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import RetryAfter, TelegramError
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from telegram.error import BadRequest, RetryAfter, TelegramError
 
 from app.amazon.client import (
     AmazonAccessBlocked,
@@ -31,8 +32,17 @@ class ExecutionSummary:
     analyzed: int = 0
     with_image: int = 0
     published: int = 0
+    updated: int = 0
+    deleted: int = 0
     ignored: int = 0
     errors: int = 0
+
+
+class ProcessResult(Enum):
+    PUBLISHED = "published"
+    UPDATED = "updated"
+    DELETED = "deleted"
+    IGNORED = "ignored"
 
 
 def build_affiliate_url(asin: str, associate_tag: str) -> str:
@@ -59,6 +69,7 @@ def format_offer_message(
         not analysis.approved
         or analysis.discount_percent is None
         or product.original_price is None
+        or product.current_price is None
     ):
         raise ValueError("Não é possível formatar um produto não aprovado como oferta.")
 
@@ -84,35 +95,28 @@ def format_offer_message(
     )
 
 
-async def process_product(
-    identifier: str,
-    bot: Bot,
-    store: SQLiteOfferStore,
-    settings: Settings,
-    *,
-    summary: ExecutionSummary | None = None,
-) -> bool:
-    product = await asyncio.to_thread(fetch_product, identifier)
-    if summary is not None and product.image_url:
-        summary.with_image += 1
-    analysis = analyze_discount(product, settings.min_discount_percent)
-    if not analysis.approved:
-        logger.info("Oferta descartada para ASIN %s: %s", product.asin, analysis.reason)
-        return False
-    if store.has_been_sent(product.asin):
-        logger.info("Oferta já enviada; ignorando ASIN %s.", product.asin)
-        return False
-
+def _build_reply_markup(product: Product, settings: Settings) -> InlineKeyboardMarkup:
     affiliate_url = build_affiliate_url(product.asin, settings.amazon_associate_tag)
-    has_image = bool(product.image_url)
-    message = format_offer_message(product, analysis)
-    reply_markup = InlineKeyboardMarkup(
+    return InlineKeyboardMarkup(
         [[InlineKeyboardButton("🛒 Ver oferta na Amazon", url=affiliate_url)]]
     )
-    if has_image:
+
+
+async def publish_offer(
+    product: Product,
+    analysis: DiscountAnalysis,
+    bot: Bot,
+    settings: Settings,
+) -> tuple[int, bool]:
+    message = format_offer_message(product, analysis)
+    reply_markup = _build_reply_markup(product, settings)
+    is_photo = bool(product.image_url)
+    published_message: Message | None = None
+
+    if is_photo:
         for attempt in range(2):
             try:
-                await bot.send_photo(
+                published_message = await bot.send_photo(
                     chat_id=settings.telegram_channel_id,
                     photo=product.image_url,
                     caption=message,
@@ -127,7 +131,7 @@ async def process_product(
                         product.asin,
                         type(exc).__name__,
                     )
-                    has_image = False
+                    is_photo = False
                     break
                 await asyncio.sleep(exc.retry_after + 1)
             except TelegramError as exc:
@@ -136,11 +140,12 @@ async def process_product(
                     product.asin,
                     type(exc).__name__,
                 )
-                has_image = False
+                is_photo = False
                 break
-    if not has_image:
+
+    if not is_photo:
         try:
-            await bot.send_message(
+            published_message = await bot.send_message(
                 chat_id=settings.telegram_channel_id,
                 text=message,
                 parse_mode="HTML",
@@ -148,20 +153,158 @@ async def process_product(
             )
         except RetryAfter as exc:
             await asyncio.sleep(exc.retry_after + 1)
-            await bot.send_message(
+            published_message = await bot.send_message(
                 chat_id=settings.telegram_channel_id,
                 text=message,
                 parse_mode="HTML",
                 reply_markup=reply_markup,
             )
 
+    if published_message is None or published_message.message_id is None:
+        raise RuntimeError(
+            f"O Telegram não retornou o ID da mensagem do ASIN {product.asin}."
+        )
+    return published_message.message_id, is_photo
+
+
+async def update_offer_message(
+    product: Product,
+    analysis: DiscountAnalysis,
+    message_id: int,
+    is_photo: bool,
+    bot: Bot,
+    settings: Settings,
+) -> None:
+    message = format_offer_message(product, analysis)
+    reply_markup = _build_reply_markup(product, settings)
+    while True:
+        try:
+            if is_photo:
+                await bot.edit_message_caption(
+                    chat_id=settings.telegram_channel_id,
+                    message_id=message_id,
+                    caption=message,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            else:
+                await bot.edit_message_text(
+                    chat_id=settings.telegram_channel_id,
+                    message_id=message_id,
+                    text=message,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+            return
+        except RetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 1)
+        except BadRequest as exc:
+            if "message is not modified" in str(exc).casefold():
+                logger.info("Mensagem %s já contém os dados atuais.", message_id)
+                return
+            raise
+
+
+async def delete_offer_message(
+    message_id: int,
+    bot: Bot,
+    settings: Settings,
+) -> None:
+    while True:
+        try:
+            await bot.delete_message(
+                chat_id=settings.telegram_channel_id,
+                message_id=message_id,
+            )
+            return
+        except RetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 1)
+        except BadRequest as exc:
+            logger.info(
+                "Mensagem %s não pôde ser excluída (%s); removendo o registro local.",
+                message_id,
+                exc,
+            )
+            return
+
+
+async def process_product(
+    identifier: str,
+    bot: Bot,
+    store: SQLiteOfferStore,
+    settings: Settings,
+    *,
+    summary: ExecutionSummary | None = None,
+) -> ProcessResult:
+    product = await asyncio.to_thread(fetch_product, identifier)
+    if summary is not None and product.image_url:
+        summary.with_image += 1
+    stored_offer = store.get_offer(product.asin)
+    if not product.in_stock:
+        logger.info("Produto sem estoque: ASIN %s.", product.asin)
+        if stored_offer is not None and stored_offer.message_id is not None:
+            await delete_offer_message(stored_offer.message_id, bot, settings)
+            store.remove_offer(product.asin)
+            return ProcessResult.DELETED
+        if stored_offer is not None:
+            store.remove_offer(product.asin)
+        return ProcessResult.IGNORED
+
+    analysis = analyze_discount(product, settings.min_discount_percent)
+    if not analysis.approved:
+        logger.info("Oferta descartada para ASIN %s: %s", product.asin, analysis.reason)
+        if stored_offer is not None and stored_offer.message_id is not None:
+            await delete_offer_message(stored_offer.message_id, bot, settings)
+            store.remove_offer(product.asin)
+            return ProcessResult.DELETED
+        if stored_offer is not None:
+            store.remove_offer(product.asin)
+        return ProcessResult.IGNORED
+    if stored_offer is not None and stored_offer.message_id is not None:
+        if stored_offer.price is None:
+            logger.warning(
+                "Oferta do ASIN %s não possui preço armazenado; mantendo mensagem.",
+                product.asin,
+            )
+            return ProcessResult.IGNORED
+        if Decimal(str(stored_offer.price)) == product.current_price:
+            logger.info("Oferta já enviada; preço inalterado para ASIN %s.", product.asin)
+            return ProcessResult.IGNORED
+        if stored_offer.is_photo is None:
+            raise RuntimeError(
+                f"Oferta do ASIN {product.asin} não possui tipo de mensagem armazenado."
+            )
+        await update_offer_message(
+            product,
+            analysis,
+            stored_offer.message_id,
+            stored_offer.is_photo,
+            bot,
+            settings,
+        )
+        if not store.update_price(product.asin, product.current_price):
+            raise RuntimeError(
+                f"Não foi possível atualizar o preço do ASIN {product.asin}."
+            )
+        logger.info("Oferta atualizada: ASIN %s.", product.asin)
+        return ProcessResult.UPDATED
+    if stored_offer is not None:
+        logger.info("Oferta já enviada; ignorando ASIN %s.", product.asin)
+        return ProcessResult.IGNORED
+
+    message_id, is_photo = await publish_offer(product, analysis, bot, settings)
     await asyncio.sleep(PUBLISH_DELAY_SECONDS)
-    if not store.record_sent(product.asin):
+    if not store.record_sent(
+        product.asin,
+        message_id=message_id,
+        price=product.current_price,
+        is_photo=is_photo,
+    ):
         raise RuntimeError(
             f"ASIN {product.asin} já estava registrado após uma publicação no Telegram."
         )
     logger.info("Oferta publicada e registrada: ASIN %s.", product.asin)
-    return True
+    return ProcessResult.PUBLISHED
 
 
 async def monitor_offers(
@@ -186,15 +329,19 @@ async def monitor_offers(
             for identifier in settings.product_identifiers:
                 summary.analyzed += 1
                 try:
-                    published = await process_product(
+                    result = await process_product(
                         identifier,
                         bot,
                         store,
                         settings,
                         summary=summary,
                     )
-                    if published:
+                    if result is ProcessResult.PUBLISHED:
                         summary.published += 1
+                    elif result is ProcessResult.UPDATED:
+                        summary.updated += 1
+                    elif result is ProcessResult.DELETED:
+                        summary.deleted += 1
                     else:
                         summary.ignored += 1
                 except AmazonAccessBlocked:

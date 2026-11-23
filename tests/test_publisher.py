@@ -2,9 +2,10 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, call, patch
 
-from telegram.error import RetryAfter, TelegramError
+from telegram.error import BadRequest, RetryAfter, TelegramError
 
 from app.amazon.client import AmazonAccessBlocked, AmazonScrapingError
 from app.amazon.models import Product
@@ -13,6 +14,7 @@ from app.deals import analyze_discount
 from app.main import main, send_test_message
 from app.publisher import (
     ExecutionSummary,
+    ProcessResult,
     PUBLISH_DELAY_SECONDS,
     build_affiliate_url,
     format_offer_message,
@@ -24,7 +26,8 @@ from app.storage import SQLiteOfferStore
 
 def make_product(
     image_url: str | None = None,
-    current_price: Decimal = Decimal("80"),
+    current_price: Decimal | None = Decimal("80"),
+    in_stock: bool = True,
 ) -> Product:
     return Product(
         asin="B000000001",
@@ -33,6 +36,7 @@ def make_product(
         current_price=current_price,
         image_url=image_url,
         source_url="https://www.amazon.com.br/dp/B000000001",
+        in_stock=in_stock,
     )
 
 
@@ -44,6 +48,13 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         )
         self.sleep_mock = self.sleep_patcher.start()
         self.addCleanup(self.sleep_patcher.stop)
+
+    @staticmethod
+    def make_bot():
+        bot = AsyncMock()
+        bot.send_message.return_value = SimpleNamespace(message_id=101)
+        bot.send_photo.return_value = SimpleNamespace(message_id=102)
+        return bot
 
     async def test_test_message_sends_to_numeric_telegram_chat_id(self):
         settings = Settings(
@@ -72,7 +83,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
         )
-        bot = AsyncMock()
+        bot = self.make_bot()
 
         with TemporaryDirectory() as directory:
             store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
@@ -90,9 +101,10 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
                     store,
                     settings,
                 )
+            offer = store.get_offer("B000000001")
 
-        self.assertTrue(first_result)
-        self.assertFalse(duplicate_result)
+        self.assertIs(first_result, ProcessResult.PUBLISHED)
+        self.assertIs(duplicate_result, ProcessResult.IGNORED)
         bot.send_message.assert_awaited_once()
         send_args = bot.send_message.await_args.kwargs
         message = send_args["text"]
@@ -107,6 +119,9 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("https://", message)
         self.assertEqual(send_args["parse_mode"], "HTML")
+        self.assertEqual(offer.message_id, 101)
+        self.assertEqual(offer.price, 80.0)
+        self.assertFalse(offer.is_photo)
         button = send_args["reply_markup"].inline_keyboard[0][0]
         self.assertEqual(button.text, "🛒 Ver oferta na Amazon")
         self.assertEqual(
@@ -122,7 +137,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
         )
-        bot = AsyncMock()
+        bot = self.make_bot()
 
         with TemporaryDirectory() as directory:
             store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
@@ -156,8 +171,11 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
         )
-        bot = AsyncMock()
-        bot.send_photo.side_effect = [RetryAfter(2), None]
+        bot = self.make_bot()
+        bot.send_photo.side_effect = [
+            RetryAfter(2),
+            SimpleNamespace(message_id=102),
+        ]
 
         with TemporaryDirectory() as directory:
             store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
@@ -170,7 +188,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
                     settings,
                 )
 
-        self.assertTrue(result)
+        self.assertIs(result, ProcessResult.PUBLISHED)
         self.assertEqual(bot.send_photo.await_count, 2)
         bot.send_message.assert_not_awaited()
         self.assertEqual(
@@ -185,9 +203,12 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
         )
-        bot = AsyncMock()
+        bot = self.make_bot()
         bot.send_photo.side_effect = TelegramError("foto rejeitada")
-        bot.send_message.side_effect = [RetryAfter(4), None]
+        bot.send_message.side_effect = [
+            RetryAfter(4),
+            SimpleNamespace(message_id=101),
+        ]
 
         with TemporaryDirectory() as directory:
             store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
@@ -200,7 +221,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
                     settings,
                 )
 
-        self.assertTrue(result)
+        self.assertIs(result, ProcessResult.PUBLISHED)
         bot.send_photo.assert_awaited_once()
         self.assertEqual(bot.send_message.await_count, 2)
         self.assertEqual(
@@ -225,7 +246,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
         )
-        bot = AsyncMock()
+        bot = self.make_bot()
 
         with TemporaryDirectory() as directory:
             store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
@@ -244,8 +265,8 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
                     settings,
                 )
 
-        self.assertTrue(first_result)
-        self.assertTrue(second_result)
+        self.assertIs(first_result, ProcessResult.PUBLISHED)
+        self.assertIs(second_result, ProcessResult.PUBLISHED)
         self.assertEqual(
             self.sleep_mock.await_args_list,
             [
@@ -262,7 +283,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
         )
-        bot = AsyncMock()
+        bot = self.make_bot()
         bot.send_photo.side_effect = TelegramError("foto rejeitada")
 
         with TemporaryDirectory() as directory:
@@ -276,7 +297,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
                     settings,
                 )
 
-        self.assertTrue(result)
+        self.assertIs(result, ProcessResult.PUBLISHED)
         bot.send_photo.assert_awaited_once()
         bot.send_message.assert_awaited_once()
         photo_args = bot.send_photo.await_args.kwargs
@@ -306,7 +327,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             telegram_bot_token="token",
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
-            product_identifiers=("one", "two", "three"),
+            product_identifiers=("one", "two", "three", "four", "five"),
         )
         summary = ExecutionSummary()
         with (
@@ -316,8 +337,10 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
                 "app.publisher.process_product",
                 new_callable=AsyncMock,
                 side_effect=[
-                    True,
-                    False,
+                    ProcessResult.PUBLISHED,
+                    ProcessResult.UPDATED,
+                    ProcessResult.DELETED,
+                    ProcessResult.IGNORED,
                     AmazonScrapingError("consulta falhou"),
                 ],
             ) as process_mock,
@@ -329,11 +352,13 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             result = await monitor_offers(settings, run_once=True, summary=summary)
 
         self.assertIs(result, summary)
-        self.assertEqual(summary.analyzed, 3)
+        self.assertEqual(summary.analyzed, 5)
         self.assertEqual(summary.published, 1)
+        self.assertEqual(summary.updated, 1)
+        self.assertEqual(summary.deleted, 1)
         self.assertEqual(summary.ignored, 1)
         self.assertEqual(summary.errors, 1)
-        self.assertEqual(process_mock.await_count, 3)
+        self.assertEqual(process_mock.await_count, 5)
         store_class.return_value.initialize.assert_called_once()
 
     async def test_main_logs_summary_when_once_finishes(self):
@@ -345,6 +370,8 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             analyzed=3,
             with_image=1,
             published=1,
+            updated=1,
+            deleted=1,
             ignored=1,
             errors=1,
         )
@@ -372,7 +399,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "Resumo da execução | Analisados: 3 | Com imagem: 1 | Publicados: 1 | "
-            "Ignorados/Já enviados: 1 | Erros: 1",
+            "Atualizados: 1 | Excluídos: 1 | Ignorados/Já enviados: 1 | Erros: 1",
             logs.output[-1],
         )
 
@@ -383,7 +410,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
         )
-        bot = AsyncMock()
+        bot = self.make_bot()
 
         with TemporaryDirectory() as directory:
             store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
@@ -393,9 +420,179 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(store.has_been_sent(product.asin))
 
-        self.assertFalse(result)
+        self.assertIs(result, ProcessResult.IGNORED)
         bot.send_message.assert_not_awaited()
         bot.send_photo.assert_not_awaited()
+
+    async def test_updates_existing_offer_when_price_changes(self):
+        product = make_product(current_price=Decimal("75"))
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = self.make_bot()
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            store.record_sent(
+                product.asin,
+                message_id=42,
+                price=Decimal("80"),
+                is_photo=False,
+            )
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    product.asin,
+                    bot,
+                    store,
+                    settings,
+                )
+
+            self.assertEqual(store.get_offer(product.asin).price, 75.0)
+
+        self.assertIs(result, ProcessResult.UPDATED)
+        bot.edit_message_text.assert_awaited_once()
+        edit_args = bot.edit_message_text.await_args.kwargs
+        self.assertEqual(edit_args["message_id"], 42)
+        self.assertIn("Por: R$ 75,00", edit_args["text"])
+        self.assertEqual(edit_args["parse_mode"], "HTML")
+        self.assertIsNotNone(edit_args["reply_markup"])
+        bot.send_message.assert_not_awaited()
+
+    async def test_updates_photo_caption_and_ignores_unchanged_message_error(self):
+        product = make_product(
+            image_url="https://images.example.test/product.jpg",
+            current_price=Decimal("75"),
+        )
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = self.make_bot()
+        bot.edit_message_caption.side_effect = [
+            RetryAfter(1),
+            BadRequest("Message is not modified"),
+        ]
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            store.record_sent(
+                product.asin,
+                message_id=42,
+                price=Decimal("80"),
+                is_photo=True,
+            )
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    product.asin,
+                    bot,
+                    store,
+                    settings,
+                )
+
+        self.assertIs(result, ProcessResult.UPDATED)
+        self.assertEqual(bot.edit_message_caption.await_count, 2)
+        edit_args = bot.edit_message_caption.await_args.kwargs
+        self.assertEqual(edit_args["message_id"], 42)
+        self.assertIn("Por: R$ 75,00", edit_args["caption"])
+        self.assertEqual(edit_args["parse_mode"], "HTML")
+        self.assertIsNotNone(edit_args["reply_markup"])
+        self.assertEqual(self.sleep_mock.await_args_list, [call(2)])
+
+    async def test_deletes_existing_offer_when_product_is_out_of_stock(self):
+        product = make_product(current_price=None, in_stock=False)
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = self.make_bot()
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            store.record_sent(
+                product.asin,
+                message_id=42,
+                price=Decimal("80"),
+                is_photo=True,
+            )
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    product.asin,
+                    bot,
+                    store,
+                    settings,
+                )
+
+            self.assertIsNone(store.get_offer(product.asin))
+
+        self.assertIs(result, ProcessResult.DELETED)
+        bot.delete_message.assert_awaited_once_with(
+            chat_id="@canal",
+            message_id=42,
+        )
+
+    async def test_deletes_existing_offer_when_discount_falls_below_minimum(self):
+        product = make_product(current_price=Decimal("85"))
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = self.make_bot()
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            store.record_sent(
+                product.asin,
+                message_id=42,
+                price=Decimal("80"),
+                is_photo=False,
+            )
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    product.asin,
+                    bot,
+                    store,
+                    settings,
+                )
+
+            self.assertIsNone(store.get_offer(product.asin))
+
+        self.assertIs(result, ProcessResult.DELETED)
+        bot.delete_message.assert_awaited_once()
+
+    async def test_ignores_bad_request_when_deleting_missing_message(self):
+        product = make_product(in_stock=False, current_price=None)
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = self.make_bot()
+        bot.delete_message.side_effect = BadRequest("Message to delete not found")
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            store.record_sent(
+                product.asin,
+                message_id=42,
+                price=Decimal("80"),
+                is_photo=False,
+            )
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(product.asin, bot, store, settings)
+
+            self.assertIsNone(store.get_offer(product.asin))
+
+        self.assertIs(result, ProcessResult.DELETED)
 
     async def test_monitor_stops_when_amazon_returns_a_block(self):
         settings = Settings(

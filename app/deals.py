@@ -24,6 +24,12 @@ def analyze_discount(
 
     original_price = product.original_price
     current_price = product.current_price
+    if current_price is None:
+        return DiscountAnalysis(
+            discount_percent=None,
+            approved=False,
+            reason="Preço atual indisponível.",
+        )
     if original_price is None:
         return DiscountAnalysis(
             discount_percent=None,

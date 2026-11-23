@@ -1,10 +1,11 @@
 import json
 import logging
 import re
+import time
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urljoin, urlparse
 
-from curl_cffi import requests
+from curl_cffi import CurlError, requests
 from bs4 import BeautifulSoup, Tag
 
 from app.amazon.models import Product
@@ -14,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 REQUEST_TIMEOUT_SECONDS = 15
+REQUEST_RETRIES = 2
+REQUEST_RETRY_DELAY_SECONDS = 2
 MAX_REDIRECTS = 3
 ASIN_PATTERN = re.compile(r"^[A-Z0-9]{10}$", re.IGNORECASE)
 ASIN_URL_PATTERN = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:[/?]|$)", re.IGNORECASE)
@@ -92,13 +95,28 @@ def _extract_asin(url: str) -> str | None:
 def _get_response(url: str) -> requests.Response:
     current_url = url
     for redirect_count in range(MAX_REDIRECTS + 1):
-        response = requests.get(
-            current_url,
-            impersonate="chrome120",
-            headers={"Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"},
-            timeout=REQUEST_TIMEOUT_SECONDS,
-            allow_redirects=False,
-        )
+        for attempt in range(REQUEST_RETRIES + 1):
+            try:
+                response = requests.get(
+                    current_url,
+                    impersonate="chrome120",
+                    headers={"Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"},
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                    allow_redirects=False,
+                )
+                break
+            except (requests.exceptions.RequestException, CurlError) as exc:
+                if attempt == REQUEST_RETRIES:
+                    raise
+                logger.warning(
+                    "Falha temporária na conexão com a Amazon (%s); "
+                    "nova tentativa %s/%s em %s segundos.",
+                    type(exc).__name__,
+                    attempt + 1,
+                    REQUEST_RETRIES,
+                    REQUEST_RETRY_DELAY_SECONDS,
+                )
+                time.sleep(REQUEST_RETRY_DELAY_SECONDS)
 
         if response.status_code in (403, 503):
             logger.error(
@@ -274,10 +292,36 @@ def _parse_product(html: str, page_url: str, asin: str) -> Product:
         raise AmazonProductParseError("Tag de título do produto não encontrada.")
     title = " ".join(title_element.stripped_strings)
 
+    availability_element = soup.select_one(
+        "#availability, #availabilityInsideBuyBox_feature_div"
+    )
+    availability = (
+        availability_element.get_text(" ", strip=True).casefold()
+        if availability_element is not None
+        else ""
+    )
+    out_of_stock = any(
+        phrase in availability
+        for phrase in (
+            "atualmente indisponível",
+            "não disponível",
+            "indisponível",
+            "sem estoque",
+            "fora de estoque",
+            "não sabemos quando",
+            "não temos previsão",
+            "currently unavailable",
+            "out of stock",
+        )
+    )
     current_price_element = _first_element(soup, CURRENT_PRICE_SELECTORS)
-    if current_price_element is None:
+    if current_price_element is None and not out_of_stock:
         raise AmazonProductParseError("Tag do preço atual não encontrada.")
-    current_price = _parse_brl_price(current_price_element.get_text(" ", strip=True))
+    current_price = (
+        _parse_brl_price(current_price_element.get_text(" ", strip=True))
+        if current_price_element is not None
+        else None
+    )
 
     original_price = None
     original_price_element = _first_element(soup, ORIGINAL_PRICE_SELECTORS)
@@ -298,6 +342,7 @@ def _parse_product(html: str, page_url: str, asin: str) -> Product:
         current_price=current_price,
         image_url=_get_image_url(soup, page_url, html),
         source_url=page_url,
+        in_stock=not out_of_stock,
     )
 
 
@@ -317,7 +362,7 @@ def fetch_product(identifier: str) -> Product:
         raise
     except AmazonScrapingError:
         raise
-    except requests.RequestException as exc:
+    except (requests.exceptions.RequestException, CurlError) as exc:
         logger.error(
             "Falha na requisição à Amazon (%s): %s",
             type(exc).__name__,

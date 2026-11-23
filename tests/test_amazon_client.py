@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from bs4 import BeautifulSoup
 from curl_cffi import requests
@@ -94,6 +94,48 @@ class AmazonClientTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AmazonProductParseError, "preço atual"):
             fetch_product("https://www.amazon.com.br/dp/B000000001")
+
+    @patch("app.amazon.client.time.sleep")
+    @patch("app.amazon.client.requests.get")
+    def test_retries_temporary_curl_ssl_error(self, get, sleep):
+        get.side_effect = [
+            requests.exceptions.SSLError("temporary TLS failure"),
+            make_response(200, PRODUCT_HTML),
+        ]
+
+        product = fetch_product("B000000001")
+
+        self.assertEqual(product.asin, "B000000001")
+        self.assertEqual(get.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    @patch("app.amazon.client.time.sleep")
+    @patch("app.amazon.client.requests.get")
+    def test_wraps_request_exception_after_two_retries(self, get, sleep):
+        get.side_effect = requests.exceptions.RequestException("connection failed")
+
+        with self.assertRaisesRegex(AmazonScrapingError, "RequestException"):
+            fetch_product("B000000001")
+
+        self.assertEqual(get.call_count, 3)
+        sleep.assert_has_calls([call(2), call(2)])
+
+    @patch("app.amazon.client.requests.get")
+    def test_parses_out_of_stock_product_without_a_current_price(self, get):
+        get.return_value = make_response(
+            200,
+            """
+            <span id="productTitle">Produto sem estoque</span>
+            <div id="availability">
+              <span>Não sabemos quando este produto estará disponível.</span>
+            </div>
+            """,
+        )
+
+        product = fetch_product("B000000001")
+
+        self.assertFalse(product.in_stock)
+        self.assertIsNone(product.current_price)
 
     @patch("app.amazon.client.requests.get")
     def test_detects_captcha_and_stops_without_retrying(self, get):

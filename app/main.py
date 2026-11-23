@@ -28,10 +28,12 @@ async def send_test_message(settings: Settings) -> None:
 def log_execution_summary(summary: ExecutionSummary) -> None:
     logger.info(
         "Resumo da execução | Analisados: %s | Com imagem: %s | Publicados: %s | "
-        "Ignorados/Já enviados: %s | Erros: %s",
+        "Atualizados: %s | Excluídos: %s | Ignorados/Já enviados: %s | Erros: %s",
         summary.analyzed,
         summary.with_image,
         summary.published,
+        summary.updated,
+        summary.deleted,
         summary.ignored,
         summary.errors,
     )
