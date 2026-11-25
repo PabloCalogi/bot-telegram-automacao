@@ -7,9 +7,14 @@ on:
   # Permite rodar manualmente clicando em um botão na aba Actions
   workflow_dispatch:
 
+concurrency:
+  group: clube-do-mago-bot
+  cancel-in-progress: false
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Baixar código do repositório
@@ -19,6 +24,7 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+          cache: 'pip'
 
       - name: Restaurar banco de ofertas (evita duplicatas)
         uses: actions/cache/restore@v6
@@ -39,11 +45,13 @@ jobs:
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
           AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
-          MIN_DISCOUNT_PERCENT: ${{ secrets.MIN_DISCOUNT_PERCENT }}
-          ENABLE_AUTO_DISCOVERY: ${{ secrets.ENABLE_AUTO_DISCOVERY }}
+          MIN_DISCOUNT_PERCENT: "15"
+          ENABLE_AUTO_DISCOVERY: "true"
           DISCOVERY_MAX_ITEMS: "10"
           DISCOVERY_MIN_PRICE: "30"
           DISCOVERY_MAX_PRICE: "200"
+          DISCOVERY_MIN_RATING: "4.3"
+          DISCOVERY_MIN_REVIEWS: "50"
         run: python -m app.main --once
 
       - name: Salvar banco de ofertas atualizado
