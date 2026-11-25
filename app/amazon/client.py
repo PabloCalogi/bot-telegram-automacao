@@ -2,6 +2,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urljoin, urlparse
@@ -20,6 +21,8 @@ REQUEST_RETRIES = 2
 REQUEST_RETRY_DELAY_SECONDS = 2
 BLOCK_PAGE_RETRIES = 2
 BLOCK_PAGE_RETRY_PROFILES = ("chrome124", "chrome120", "safari15_5")
+REQUEST_DELAY_RANGE_SECONDS = (1.5, 3.5)
+DEFAULT_HEADERS = {"Accept-Language": "pt-BR,pt;q=0.9"}
 MAX_REDIRECTS = 3
 ASIN_PATTERN = re.compile(r"^[A-Z0-9]{10}$", re.IGNORECASE)
 ASIN_URL_PATTERN = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:[/?]|$)", re.IGNORECASE)
@@ -57,6 +60,11 @@ PLACEHOLDER_IMAGE_MARKERS = (
     "spacer.gif",
     "blank.gif",
 )
+
+
+_amazon_session: requests.Session | None = None
+_last_request_started_at: float | None = None
+_session_lock = threading.RLock()
 
 
 class AmazonScrapingError(Exception):
@@ -112,6 +120,54 @@ def _extract_asin(url: str) -> str | None:
     return match.group(1).upper() if match else None
 
 
+def _get_session() -> requests.Session:
+    global _amazon_session
+    with _session_lock:
+        if _amazon_session is None:
+            _amazon_session = requests.Session(headers=DEFAULT_HEADERS)
+        return _amazon_session
+
+
+def close_amazon_session() -> None:
+    global _amazon_session, _last_request_started_at
+    with _session_lock:
+        session = _amazon_session
+        _amazon_session = None
+        _last_request_started_at = None
+        if session is not None:
+            session.close()
+
+
+def _session_get(
+    url: str,
+    *,
+    impersonate: str,
+    timeout: int,
+    allow_redirects: bool,
+) -> requests.Response:
+    global _last_request_started_at
+    with _session_lock:
+        started_at = time.monotonic()
+        if _last_request_started_at is not None:
+            minimum_delay, maximum_delay = REQUEST_DELAY_RANGE_SECONDS
+            delay = (
+                random.uniform(minimum_delay, maximum_delay)
+                if maximum_delay > 0
+                else 0
+            )
+            remaining = delay - (started_at - _last_request_started_at)
+            if remaining > 0:
+                time.sleep(remaining)
+                started_at += remaining
+        _last_request_started_at = started_at
+        return _get_session().get(
+            url,
+            impersonate=impersonate,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
+
+
 def _get_response(
     url: str,
     *,
@@ -121,10 +177,9 @@ def _get_response(
     for redirect_count in range(MAX_REDIRECTS + 1):
         for attempt in range(REQUEST_RETRIES + 1):
             try:
-                response = requests.get(
+                response = _session_get(
                     current_url,
                     impersonate=impersonate,
-                    headers={"Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"},
                     timeout=REQUEST_TIMEOUT_SECONDS,
                     allow_redirects=False,
                 )

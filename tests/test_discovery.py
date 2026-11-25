@@ -2,6 +2,9 @@ import unittest
 from decimal import Decimal
 from unittest.mock import call, patch
 
+from curl_cffi import requests
+
+from app.amazon.client import close_amazon_session
 from app.amazon.discovery import discover_products, extract_discovered_asins
 
 
@@ -136,6 +139,38 @@ class AmazonDiscoveryTests(unittest.TestCase):
         self.assertIn("avaliações ausentes: 1", category_summary)
         self.assertIn("avaliações abaixo do mínimo: 1", category_summary)
         self.assertIn("ASINs aprovados: 1", category_summary)
+
+    def test_categories_reuse_the_client_session_and_close_it(self):
+        first_page = product_card("B000000021", "80,00")
+        second_page = product_card("B000000022", "80,00")
+        first_response = requests.Response()
+        first_response.status_code = 200
+        first_response.url = "https://www.amazon.com.br/gp/bestsellers/one"
+        first_response._text = first_page
+        second_response = requests.Response()
+        second_response.status_code = 200
+        second_response.url = "https://www.amazon.com.br/gp/bestsellers/two"
+        second_response._text = second_page
+
+        with (
+            patch("app.amazon.client.requests.Session") as session_class,
+            patch("app.amazon.client.REQUEST_DELAY_RANGE_SECONDS", (0, 0)),
+        ):
+            session = session_class.return_value
+            session.get.side_effect = [first_response, second_response]
+
+            products = discover_products(
+                (),
+                category_urls=("category-one", "category-two"),
+            )
+            close_amazon_session()
+
+        self.assertEqual(products, ("B000000021", "B000000022"))
+        session_class.assert_called_once_with(
+            headers={"Accept-Language": "pt-BR,pt;q=0.9"}
+        )
+        self.assertEqual(session.get.call_count, 2)
+        session.close.assert_called_once()
 
     def test_excludes_fixed_asins_deduplicates_and_obeys_max_items(self):
         first_page = (

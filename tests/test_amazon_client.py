@@ -9,6 +9,7 @@ from app.amazon.client import (
     AmazonProductParseError,
     AmazonScrapingError,
     _get_image_url,
+    close_amazon_session,
     fetch_product,
 )
 
@@ -42,9 +43,22 @@ def extract_image_url(html: str) -> str | None:
 
 
 class AmazonClientTests(unittest.TestCase):
-    @patch("app.amazon.client.requests.get")
-    def test_fetch_product_extracts_fields_with_chrome_impersonation(self, get):
-        get.return_value = make_response(200, PRODUCT_HTML)
+    def setUp(self):
+        close_amazon_session()
+        self.session_patcher = patch("app.amazon.client.requests.Session")
+        self.session_class = self.session_patcher.start()
+        self.session = self.session_class.return_value
+        self.delay_patcher = patch(
+            "app.amazon.client.REQUEST_DELAY_RANGE_SECONDS",
+            (0, 0),
+        )
+        self.delay_patcher.start()
+        self.addCleanup(self.session_patcher.stop)
+        self.addCleanup(self.delay_patcher.stop)
+        self.addCleanup(close_amazon_session)
+
+    def test_fetch_product_extracts_fields_with_chrome_impersonation(self):
+        self.session.get.return_value = make_response(200, PRODUCT_HTML)
 
         product = fetch_product("B000000001")
 
@@ -57,18 +71,49 @@ class AmazonClientTests(unittest.TestCase):
             "https://www.amazon.com.br/images/product.jpg",
         )
         self.assertEqual(product.source_url, "https://www.amazon.com.br/dp/B000000001")
-        self.assertEqual(
-            get.call_args.kwargs["headers"],
-            {"Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"},
+        self.session_class.assert_called_once_with(
+            headers={"Accept-Language": "pt-BR,pt;q=0.9"}
         )
-        self.assertEqual(get.call_args.kwargs["impersonate"], "chrome124")
-        self.assertFalse(get.call_args.kwargs["allow_redirects"])
+        self.assertEqual(
+            self.session.get.call_args.kwargs["impersonate"],
+            "chrome124",
+        )
+        self.assertFalse(self.session.get.call_args.kwargs["allow_redirects"])
 
-    @patch("app.amazon.client.requests.get")
-    def test_extracts_asin_from_input_url_when_response_url_omits_it(self, get):
+    def test_reuses_and_closes_session_with_configured_request_delay(self):
+        self.session.get.side_effect = [
+            make_response(200, PRODUCT_HTML),
+            make_response(200, PRODUCT_HTML),
+        ]
+        with (
+            patch(
+                "app.amazon.client.REQUEST_DELAY_RANGE_SECONDS",
+                (2.0, 2.0),
+            ),
+            patch(
+                "app.amazon.client.time.monotonic",
+                side_effect=(10.0, 11.0),
+            ),
+            patch("app.amazon.client.random.uniform", return_value=2.0),
+            patch("app.amazon.client.time.sleep") as sleep,
+        ):
+            fetch_product("B000000001")
+            fetch_product("B000000001")
+
+        self.session_class.assert_called_once_with(
+            headers={"Accept-Language": "pt-BR,pt;q=0.9"}
+        )
+        self.assertEqual(self.session.get.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+        close_amazon_session()
+
+        self.session.close.assert_called_once()
+
+    def test_extracts_asin_from_input_url_when_response_url_omits_it(self):
         response = make_response(200, PRODUCT_HTML)
         response.url = "https://www.amazon.com.br/"
-        get.return_value = response
+        self.session.get.return_value = response
 
         product = fetch_product(
             "https://www.amazon.com.br/gp/product/B000000001"
@@ -76,16 +121,15 @@ class AmazonClientTests(unittest.TestCase):
 
         self.assertEqual(product.asin, "B000000001")
 
-    @patch("app.amazon.client.requests.get")
-    def test_fetch_product_stops_on_forbidden_or_unavailable(self, get):
+    def test_fetch_product_stops_on_forbidden_or_unavailable(self):
         with (
             patch("app.amazon.client.time.sleep"),
             patch("app.amazon.client.random.uniform", return_value=2.5),
         ):
             for status_code in (403, 503):
                 with self.subTest(status_code=status_code):
-                    get.reset_mock()
-                    get.side_effect = [
+                    self.session.get.reset_mock()
+                    self.session.get.side_effect = [
                         make_response(status_code)
                         for _ in range(3)
                     ]
@@ -93,50 +137,53 @@ class AmazonClientTests(unittest.TestCase):
                         with self.assertRaises(AmazonAccessBlocked):
                             fetch_product("B000000001")
                     self.assertIn(f"HTTP {status_code}", logs.output[0])
-                    self.assertEqual(get.call_count, 3)
+                    self.assertEqual(self.session.get.call_count, 3)
                     self.assertEqual(
                         [
                             request.kwargs["impersonate"]
-                            for request in get.call_args_list
+                            for request in self.session.get.call_args_list
                         ],
                         ["chrome124", "chrome120", "safari15_5"],
                     )
 
-    @patch("app.amazon.client.requests.get")
-    def test_missing_current_price_raises_parse_error(self, get):
-        get.return_value = make_response(200, '<span id="productTitle">Produto</span>')
+    def test_missing_current_price_raises_parse_error(self):
+        self.session.get.return_value = make_response(
+            200,
+            '<span id="productTitle">Produto</span>',
+        )
 
         with self.assertRaisesRegex(AmazonProductParseError, "preço atual"):
             fetch_product("https://www.amazon.com.br/dp/B000000001")
 
-    @patch("app.amazon.client.time.sleep")
-    @patch("app.amazon.client.requests.get")
-    def test_retries_temporary_curl_ssl_error(self, get, sleep):
-        get.side_effect = [
+    def test_retries_temporary_curl_ssl_error(self):
+        self.session.get.side_effect = [
             requests.exceptions.SSLError("temporary TLS failure"),
             make_response(200, PRODUCT_HTML),
         ]
 
-        product = fetch_product("B000000001")
+        with patch("app.amazon.client.time.sleep") as sleep:
+            product = fetch_product("B000000001")
 
         self.assertEqual(product.asin, "B000000001")
-        self.assertEqual(get.call_count, 2)
+        self.assertEqual(self.session.get.call_count, 2)
         sleep.assert_called_once_with(2)
 
-    @patch("app.amazon.client.time.sleep")
-    @patch("app.amazon.client.requests.get")
-    def test_wraps_request_exception_after_two_retries(self, get, sleep):
-        get.side_effect = requests.exceptions.RequestException("connection failed")
+    def test_wraps_request_exception_after_two_retries(self):
+        self.session.get.side_effect = requests.exceptions.RequestException(
+            "connection failed"
+        )
 
-        with self.assertRaisesRegex(AmazonScrapingError, "RequestException"):
+        with (
+            patch("app.amazon.client.time.sleep") as sleep,
+            self.assertRaisesRegex(AmazonScrapingError, "RequestException"),
+        ):
             fetch_product("B000000001")
 
-        self.assertEqual(get.call_count, 3)
+        self.assertEqual(self.session.get.call_count, 3)
         sleep.assert_has_calls([call(2), call(2)])
 
-    @patch("app.amazon.client.requests.get")
-    def test_parses_out_of_stock_product_without_a_current_price(self, get):
-        get.return_value = make_response(
+    def test_parses_out_of_stock_product_without_a_current_price(self):
+        self.session.get.return_value = make_response(
             200,
             """
             <span id="productTitle">Produto sem estoque</span>
@@ -160,14 +207,12 @@ class AmazonClientTests(unittest.TestCase):
         )
         for incomplete_page in incomplete_pages:
             with self.subTest(incomplete_page=incomplete_page):
+                self.session.get.reset_mock()
+                self.session.get.side_effect = [
+                    make_response(200, incomplete_page),
+                    make_response(200, PRODUCT_HTML),
+                ]
                 with (
-                    patch(
-                        "app.amazon.client.requests.get",
-                        side_effect=[
-                            make_response(200, incomplete_page),
-                            make_response(200, PRODUCT_HTML),
-                        ],
-                    ) as get,
                     patch("app.amazon.client.time.sleep") as sleep,
                     patch(
                         "app.amazon.client.random.uniform",
@@ -177,23 +222,23 @@ class AmazonClientTests(unittest.TestCase):
                     product = fetch_product("B000000001")
 
                 self.assertEqual(product.title, "Produto de teste")
-                self.assertEqual(get.call_count, 2)
+                self.assertEqual(self.session.get.call_count, 2)
                 self.assertEqual(
-                    [request.kwargs["impersonate"] for request in get.call_args_list],
+                    [
+                        request.kwargs["impersonate"]
+                        for request in self.session.get.call_args_list
+                    ],
                     ["chrome124", "chrome120"],
                 )
                 jitter.assert_called_once_with(2, 5)
                 sleep.assert_called_once_with(2.5)
 
     def test_stops_after_two_captcha_retries(self):
+        self.session.get.side_effect = [
+            make_response(200, '<html><title>captcha challenge</title></html>')
+            for _ in range(3)
+        ]
         with (
-            patch(
-                "app.amazon.client.requests.get",
-                side_effect=[
-                    make_response(200, '<html><title>captcha challenge</title></html>')
-                    for _ in range(3)
-                ],
-            ) as get,
             patch("app.amazon.client.time.sleep") as sleep,
             patch("app.amazon.client.random.uniform", return_value=3),
             self.assertLogs("app.amazon.client", level="WARNING") as logs,
@@ -202,16 +247,15 @@ class AmazonClientTests(unittest.TestCase):
                 fetch_product("B000000001")
 
         self.assertIn("Bloqueio de CAPTCHA/Robot Check detectado", logs.output[0])
-        self.assertEqual(get.call_count, 3)
+        self.assertEqual(self.session.get.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 
-    @patch("app.amazon.client.requests.get")
-    def test_missing_original_price_and_image_are_reported_as_optional(self, get):
+    def test_missing_original_price_and_image_are_reported_as_optional(self):
         html = """
         <span id="productTitle">Produto sem desconto</span>
         <span id="priceblock_ourprice">R$ 49,90</span>
         """
-        get.return_value = make_response(200, html)
+        self.session.get.return_value = make_response(200, html)
 
         product = fetch_product("B000000001")
 
@@ -283,11 +327,10 @@ class AmazonClientTests(unittest.TestCase):
         """
         self.assertIsNone(extract_image_url(html))
 
-    @patch("app.amazon.client.requests.get")
-    def test_rejects_urls_outside_amazon_brazil_before_request(self, get):
+    def test_rejects_urls_outside_amazon_brazil_before_request(self):
         with self.assertRaises(AmazonScrapingError):
             fetch_product("https://amazon.com/dp/B000000001")
-        get.assert_not_called()
+        self.session_class.assert_not_called()
 
 
 if __name__ == "__main__":

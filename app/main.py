@@ -7,7 +7,11 @@ from dataclasses import replace
 from telegram import Bot
 from telegram.error import TelegramError
 
-from app.amazon.client import AmazonAccessBlocked, AmazonScrapingError
+from app.amazon.client import (
+    AmazonAccessBlocked,
+    AmazonScrapingError,
+    close_amazon_session,
+)
 from app.amazon.discovery import discover_products
 from app.config import Settings
 from app.publisher import (
@@ -134,27 +138,30 @@ def main() -> None:
         logger.error("Falha fatal no bot (%s).", type(exc).__name__)
         raise
     finally:
-        if args.once:
-            log_execution_summary(summary)
-        bot_token = (
-            settings.telegram_bot_token
-            if settings is not None
-            else os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-        )
-        admin_chat_id = (
-            settings.telegram_admin_chat_id
-            if settings is not None
-            else os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
-        )
-        if bot_token and admin_chat_id:
-            asyncio.run(
-                send_health_alert_if_needed(
-                    summary,
-                    bot_token,
-                    admin_chat_id,
-                    fatal=fatal,
-                )
+        try:
+            if args.once:
+                log_execution_summary(summary)
+            bot_token = (
+                settings.telegram_bot_token
+                if settings is not None
+                else os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
             )
+            admin_chat_id = (
+                settings.telegram_admin_chat_id
+                if settings is not None
+                else os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip()
+            )
+            if bot_token and admin_chat_id:
+                asyncio.run(
+                    send_health_alert_if_needed(
+                        summary,
+                        bot_token,
+                        admin_chat_id,
+                        fatal=fatal,
+                    )
+                )
+        finally:
+            close_amazon_session()
 
     if args.test_telegram:
         logger.info("Mensagem de teste enviada com sucesso.")

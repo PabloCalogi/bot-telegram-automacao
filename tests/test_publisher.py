@@ -420,6 +420,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
                 "app.main.asyncio.run",
                 side_effect=lambda coroutine: coroutine.close(),
             ),
+            patch("app.main.close_amazon_session") as close_session_mock,
             self.assertLogs("app.main", level="INFO") as logs,
         ):
             main()
@@ -429,6 +430,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             run_once=True,
             summary=summary,
         )
+        close_session_mock.assert_called_once()
         self.assertIn(
             "Resumo da execução | Analisados: 3 | Com imagem: 1 | Publicados: 1 | "
             "Atualizados: 1 | Excluídos: 1 | Ignorados/Já enviados: 1 | Erros: 1",
