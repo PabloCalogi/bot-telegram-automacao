@@ -407,13 +407,29 @@ def discover_products(
         except AmazonAccessBlocked as exc:
             stats.captcha_detected = True
             _record_error_status(exc, stats)
-            raise
+            logger.warning(
+                "Categoria Mais Vendidos %s bloqueada (%s); tentando as próximas.",
+                url,
+                exc,
+            )
         except AmazonScrapingError as exc:
             _record_error_status(exc, stats)
-            raise
+            logger.warning(
+                "Falha na categoria Mais Vendidos %s (%s); tentando as próximas.",
+                url,
+                exc,
+            )
         finally:
             _log_category_summary("Fim", url, stats)
 
         if len(discovered) >= max_items:
             break
+    if not discovered:
+        logger.warning(
+            "Falha total da descoberta automática: nenhuma categoria retornou "
+            "ASINs válidos."
+        )
+        raise AmazonScrapingError(
+            "Nenhuma categoria da descoberta retornou ASINs válidos."
+        )
     return tuple(discovered)

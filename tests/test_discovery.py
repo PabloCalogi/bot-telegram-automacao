@@ -4,7 +4,11 @@ from unittest.mock import call, patch
 
 from curl_cffi import requests
 
-from app.amazon.client import close_amazon_session
+from app.amazon.client import (
+    AmazonAccessBlocked,
+    AmazonScrapingError,
+    close_amazon_session,
+)
 from app.amazon.discovery import discover_products, extract_discovered_asins
 
 
@@ -171,6 +175,96 @@ class AmazonDiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(session.get.call_count, 2)
         session.close.assert_called_once()
+
+    def test_continues_to_next_category_after_blocked_category(self):
+        valid_page = product_card("B000000023", "80,00")
+        with (
+            patch(
+                "app.amazon.discovery._fetch_page",
+                side_effect=[
+                    AmazonAccessBlocked("HTTP 503"),
+                    (valid_page, 200),
+                ],
+            ) as fetch_page,
+            self.assertLogs("app.amazon.discovery", level="WARNING") as logs,
+        ):
+            products = discover_products(
+                (),
+                category_urls=("blocked-category", "working-category"),
+            )
+
+        self.assertEqual(products, ("B000000023",))
+        fetch_page.assert_has_calls(
+            [call("blocked-category"), call("working-category")]
+        )
+        self.assertTrue(
+            any("bloqueada" in message for message in logs.output)
+        )
+
+    def test_category_reuses_client_retry_for_transient_network_error(self):
+        response = requests.Response()
+        response.status_code = 200
+        response.url = "https://www.amazon.com.br/gp/bestsellers/test"
+        response._text = product_card("B000000025", "80,00")
+        with (
+            patch("app.amazon.client.requests.Session") as session_class,
+            patch("app.amazon.client.REQUEST_DELAY_RANGE_SECONDS", (0, 0)),
+            patch("app.amazon.client.time.sleep") as sleep,
+        ):
+            session = session_class.return_value
+            session.get.side_effect = [
+                requests.exceptions.RequestException("temporary network error"),
+                response,
+            ]
+
+            products = discover_products(
+                (),
+                category_urls=("working-after-network-retry",),
+            )
+            close_amazon_session()
+
+        self.assertEqual(products, ("B000000025",))
+        self.assertEqual(session.get.call_count, 2)
+        sleep.assert_called_once_with(2)
+        session_class.assert_called_once()
+
+    def test_persistent_category_failure_does_not_prevent_next_category(self):
+        valid_page = product_card("B000000024", "80,00")
+        with (
+            patch(
+                "app.amazon.discovery._fetch_page",
+                side_effect=[
+                    AmazonScrapingError("Falha de rede após retries"),
+                    (valid_page, 200),
+                ],
+            ) as fetch_page,
+            self.assertLogs("app.amazon.discovery", level="WARNING") as logs,
+        ):
+            products = discover_products(
+                (),
+                category_urls=("failed-category", "working-category"),
+            )
+
+        self.assertEqual(products, ("B000000024",))
+        fetch_page.assert_has_calls(
+            [call("failed-category"), call("working-category")]
+        )
+        self.assertTrue(
+            any("tentando as próximas" in message for message in logs.output)
+        )
+
+    def test_reports_total_failure_only_when_no_category_returns_products(self):
+        with (
+            patch(
+                "app.amazon.discovery._fetch_page",
+                side_effect=AmazonScrapingError("Falha de rede após retries"),
+            ),
+            self.assertLogs("app.amazon.discovery", level="WARNING") as logs,
+        ):
+            with self.assertRaisesRegex(AmazonScrapingError, "Nenhuma categoria"):
+                discover_products((), category_urls=("failed-category",))
+
+        self.assertTrue(any("Falha total" in message for message in logs.output))
 
     def test_excludes_fixed_asins_deduplicates_and_obeys_max_items(self):
         first_page = (
