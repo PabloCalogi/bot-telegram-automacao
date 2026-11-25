@@ -3,7 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 from telegram.error import BadRequest, RetryAfter, TelegramError
 
@@ -393,6 +393,50 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(process_mock.await_count, 5)
         store_class.return_value.initialize.assert_called_once()
 
+    async def test_monitor_processes_discovered_ids_after_fixed_and_deduplicates(self):
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+            product_identifiers=("B000000001",),
+        )
+        order = []
+
+        async def process_identifier(identifier, *args, **kwargs):
+            order.append(identifier)
+            return ProcessResult.IGNORED
+
+        def discover_after_fixed():
+            order.append("discovery")
+            return ("B000000001", "B000000002", "B000000002")
+
+        summary = ExecutionSummary()
+        with (
+            patch("app.publisher.Bot") as bot_class,
+            patch("app.publisher.SQLiteOfferStore") as store_class,
+            patch(
+                "app.publisher.process_product",
+                new_callable=AsyncMock,
+                side_effect=process_identifier,
+            ) as process_mock,
+        ):
+            bot_context = bot_class.return_value
+            bot_context.__aenter__ = AsyncMock(return_value=AsyncMock())
+            bot_context.__aexit__ = AsyncMock(return_value=False)
+
+            await monitor_offers(
+                settings,
+                run_once=True,
+                summary=summary,
+                after_fixed_products=discover_after_fixed,
+            )
+
+        self.assertEqual(order, ["B000000001", "discovery", "B000000002"])
+        self.assertEqual(process_mock.await_count, 2)
+        self.assertEqual(summary.analyzed, 2)
+        self.assertEqual(summary.ignored, 2)
+        store_class.return_value.initialize.assert_called_once()
+
     async def test_main_logs_summary_when_once_finishes(self):
         settings = Settings(
             telegram_bot_token="token",
@@ -451,7 +495,11 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             patch("app.main.ExecutionSummary", return_value=ExecutionSummary()),
             patch(
                 "app.main.discover_products",
-                return_value=("B000000002",),
+                return_value=(
+                    "B000000001",
+                    "B000000002",
+                    "B000000002",
+                ),
             ) as discover_mock,
             patch("app.main.monitor_offers", new_callable=AsyncMock) as monitor_mock,
             patch(
@@ -460,7 +508,19 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             main()
+            discover_mock.assert_not_called()
+            after_fixed_products = monitor_mock.call_args.kwargs[
+                "after_fixed_products"
+            ]
+            discovered = after_fixed_products()
 
+        monitor_mock.assert_called_once_with(
+            settings,
+            run_once=True,
+            summary=ANY,
+            after_fixed_products=ANY,
+        )
+        self.assertEqual(discovered, ("B000000002",))
         discover_mock.assert_called_once_with(
             ("B000000001",),
             max_items=10,
@@ -468,11 +528,6 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             max_price=Decimal("200.0"),
             min_rating=Decimal("4.3"),
             min_reviews=50,
-        )
-        monitored_settings = monitor_mock.call_args.args[0]
-        self.assertEqual(
-            monitored_settings.product_identifiers,
-            ("B000000001", "B000000002"),
         )
 
     async def test_main_continues_with_fixed_products_when_discovery_fails(self):
@@ -490,7 +545,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "app.main.discover_products",
                 side_effect=AmazonScrapingError("blocked"),
-            ),
+            ) as discover_mock,
             patch("app.main.monitor_offers", new_callable=AsyncMock) as monitor_mock,
             patch(
                 "app.main.asyncio.run",
@@ -499,12 +554,21 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             self.assertLogs("app.main", level="WARNING") as logs,
         ):
             main()
+            after_fixed_products = monitor_mock.call_args.kwargs[
+                "after_fixed_products"
+            ]
+            self.assertEqual(after_fixed_products(), ())
 
-        self.assertIn("usando apenas produtos fixos", logs.output[0])
-        self.assertEqual(
-            monitor_mock.call_args.args[0].product_identifiers,
+        self.assertTrue(any("mantendo os resultados" in line for line in logs.output))
+        discover_mock.assert_called_once_with(
             ("B000000001",),
+            max_items=10,
+            min_price=Decimal("30.0"),
+            max_price=Decimal("200.0"),
+            min_rating=Decimal("4.3"),
+            min_reviews=50,
         )
+        self.assertEqual(monitor_mock.call_args.args[0], settings)
 
     async def test_health_alert_is_sent_when_error_threshold_is_reached(self):
         summary = ExecutionSummary(
@@ -856,6 +920,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             product_identifiers=tuple(f"asin-{index}" for index in range(3)),
         )
         summary = ExecutionSummary()
+        discover_after_fixed = Mock(return_value=("B000000004",))
         with (
             patch("app.publisher.Bot") as bot_class,
             patch("app.publisher.SQLiteOfferStore") as store_class,
@@ -873,11 +938,17 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             bot_context.__aexit__ = AsyncMock(return_value=False)
 
             with self.assertRaises(AmazonAccessBlocked):
-                await monitor_offers(settings, run_once=True, summary=summary)
+                await monitor_offers(
+                    settings,
+                    run_once=True,
+                    summary=summary,
+                    after_fixed_products=discover_after_fixed,
+                )
 
         self.assertEqual(process_mock.await_count, 3)
         self.assertEqual(summary.analyzed, 3)
         self.assertEqual(summary.errors, 3)
+        discover_after_fixed.assert_not_called()
         store_class.return_value.initialize.assert_called_once()
 
 

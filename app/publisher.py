@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
@@ -399,8 +400,9 @@ async def monitor_offers(
     *,
     run_once: bool = False,
     summary: ExecutionSummary | None = None,
+    after_fixed_products: Callable[[], tuple[str, ...]] | None = None,
 ) -> ExecutionSummary:
-    if not settings.product_identifiers:
+    if not settings.product_identifiers and after_fixed_products is None:
         raise ValueError("Configure PRODUCT_IDENTIFIERS no arquivo .env.")
     if not settings.amazon_associate_tag:
         raise ValueError("Configure AMAZON_ASSOCIATE_TAG no arquivo .env.")
@@ -412,59 +414,76 @@ async def monitor_offers(
     store.initialize()
 
     consecutive_amazon_blocks = 0
+    identifiers = list(settings.product_identifiers)
+    processed_identifiers = set(identifiers)
+
+    async def process_identifier(identifier: str, bot: Bot) -> None:
+        nonlocal consecutive_amazon_blocks
+        summary.analyzed += 1
+        try:
+            result = await process_product(
+                identifier,
+                bot,
+                store,
+                settings,
+                summary=summary,
+            )
+            consecutive_amazon_blocks = 0
+            if result is ProcessResult.PUBLISHED:
+                summary.published += 1
+            elif result is ProcessResult.UPDATED:
+                summary.updated += 1
+            elif result is ProcessResult.DELETED:
+                summary.deleted += 1
+            else:
+                summary.ignored += 1
+        except AmazonAccessBlocked as exc:
+            summary.errors += 1
+            summary.record_error(exc)
+            consecutive_amazon_blocks += 1
+            if consecutive_amazon_blocks >= MAX_CONSECUTIVE_AMAZON_BLOCKS:
+                logger.error(
+                    "Monitoramento encerrado após %s bloqueios consecutivos "
+                    "da Amazon.",
+                    consecutive_amazon_blocks,
+                )
+                raise
+            logger.warning(
+                "ASIN %s ignorado após bloqueio da Amazon (%s/%s "
+                "bloqueios consecutivos).",
+                identifier,
+                consecutive_amazon_blocks,
+                MAX_CONSECUTIVE_AMAZON_BLOCKS,
+            )
+        except AmazonScrapingError as exc:
+            summary.errors += 1
+            summary.record_error(exc)
+            logger.warning("Consulta ignorada para %s: %s", identifier, exc)
+        except TelegramError as exc:
+            consecutive_amazon_blocks = 0
+            summary.errors += 1
+            summary.record_error(exc)
+            logger.error(
+                "Erro do Telegram ao processar %s (%s).",
+                identifier,
+                type(exc).__name__,
+            )
+        await asyncio.sleep(REQUEST_DELAY_SECONDS)
+
     async with Bot(token=settings.telegram_bot_token) as bot:
         while True:
-            for identifier in settings.product_identifiers:
-                summary.analyzed += 1
-                try:
-                    result = await process_product(
-                        identifier,
-                        bot,
-                        store,
-                        settings,
-                        summary=summary,
-                    )
-                    consecutive_amazon_blocks = 0
-                    if result is ProcessResult.PUBLISHED:
-                        summary.published += 1
-                    elif result is ProcessResult.UPDATED:
-                        summary.updated += 1
-                    elif result is ProcessResult.DELETED:
-                        summary.deleted += 1
-                    else:
-                        summary.ignored += 1
-                except AmazonAccessBlocked as exc:
-                    summary.errors += 1
-                    summary.record_error(exc)
-                    consecutive_amazon_blocks += 1
-                    if consecutive_amazon_blocks >= MAX_CONSECUTIVE_AMAZON_BLOCKS:
-                        logger.error(
-                            "Monitoramento encerrado após %s bloqueios consecutivos "
-                            "da Amazon.",
-                            consecutive_amazon_blocks,
-                        )
-                        raise
-                    logger.warning(
-                        "ASIN %s ignorado após bloqueio da Amazon (%s/%s "
-                        "bloqueios consecutivos).",
-                        identifier,
-                        consecutive_amazon_blocks,
-                        MAX_CONSECUTIVE_AMAZON_BLOCKS,
-                    )
-                except AmazonScrapingError as exc:
-                    summary.errors += 1
-                    summary.record_error(exc)
-                    logger.warning("Consulta ignorada para %s: %s", identifier, exc)
-                except TelegramError as exc:
-                    consecutive_amazon_blocks = 0
-                    summary.errors += 1
-                    summary.record_error(exc)
-                    logger.error(
-                        "Erro do Telegram ao processar %s (%s).",
-                        identifier,
-                        type(exc).__name__,
-                    )
-                await asyncio.sleep(REQUEST_DELAY_SECONDS)
+            for identifier in identifiers:
+                await process_identifier(identifier, bot)
+
+            if after_fixed_products is not None:
+                discovered_identifiers = after_fixed_products()
+                after_fixed_products = None
+                for identifier in discovered_identifiers:
+                    if identifier in processed_identifiers:
+                        continue
+                    processed_identifiers.add(identifier)
+                    identifiers.append(identifier)
+                    await process_identifier(identifier, bot)
 
             if run_once:
                 return summary

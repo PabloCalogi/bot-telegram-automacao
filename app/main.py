@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import logging
 import os
-from dataclasses import replace
 
 from telegram import Bot
 from telegram.error import TelegramError
@@ -12,7 +11,7 @@ from app.amazon.client import (
     AmazonScrapingError,
     close_amazon_session,
 )
-from app.amazon.discovery import discover_products
+from app.amazon.discovery import _normalize_asin, discover_products
 from app.config import Settings
 from app.publisher import (
     ExecutionSummary,
@@ -76,43 +75,58 @@ def main() -> None:
             asyncio.run(send_test_message(settings))
         else:
             if settings.enable_auto_discovery:
-                try:
-                    discovered = discover_products(
-                        settings.product_identifiers,
-                        max_items=settings.discovery_max_items,
-                        min_price=settings.discovery_min_price,
-                        max_price=settings.discovery_max_price,
-                        min_rating=settings.discovery_min_rating,
-                        min_reviews=settings.discovery_min_reviews,
-                    )
-                except AmazonScrapingError as exc:
-                    logger.warning(
-                        "Descoberta automática falhou (%s); usando apenas produtos "
-                        "fixos.",
-                        type(exc).__name__,
-                    )
-                else:
-                    fixed_asins = {
-                        identifier.strip().upper()
+                def discover_after_fixed_products() -> tuple[str, ...]:
+                    try:
+                        discovered = discover_products(
+                            settings.product_identifiers,
+                            max_items=settings.discovery_max_items,
+                            min_price=settings.discovery_min_price,
+                            max_price=settings.discovery_max_price,
+                            min_rating=settings.discovery_min_rating,
+                            min_reviews=settings.discovery_min_reviews,
+                        )
+                    except AmazonScrapingError as exc:
+                        logger.warning(
+                            "Descoberta automática falhou (%s); mantendo os "
+                            "resultados da lista fixa.",
+                            type(exc).__name__,
+                        )
+                        return ()
+
+                    known_asins = {
+                        asin
                         for identifier in settings.product_identifiers
+                        if (asin := _normalize_asin(identifier)) is not None
                     }
-                    new_products = tuple(
-                        asin for asin in discovered if asin not in fixed_asins
-                    )
-                    settings = replace(
+                    new_products = []
+                    for identifier in discovered:
+                        asin = _normalize_asin(identifier)
+                        if asin is not None and asin not in known_asins:
+                            known_asins.add(asin)
+                            new_products.append(asin)
+                    if not new_products:
+                        logger.warning(
+                            "Descoberta automática não retornou novos ASINs; "
+                            "mantendo os resultados da lista fixa."
+                        )
+                    return tuple(new_products)
+
+                asyncio.run(
+                    monitor_offers(
                         settings,
-                        product_identifiers=(
-                            *settings.product_identifiers,
-                            *new_products,
-                        ),
+                        run_once=args.once,
+                        summary=summary,
+                        after_fixed_products=discover_after_fixed_products,
                     )
-            asyncio.run(
-                monitor_offers(
-                    settings,
-                    run_once=args.once,
-                    summary=summary,
                 )
-            )
+            else:
+                asyncio.run(
+                    monitor_offers(
+                        settings,
+                        run_once=args.once,
+                        summary=summary,
+                    )
+                )
     except ValueError as exc:
         fatal = True
         summary.errors += 1
