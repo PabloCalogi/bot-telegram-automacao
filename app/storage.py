@@ -44,6 +44,16 @@ class SQLiteOfferStore:
                     )
                     """
                 )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS price_history (
+                        asin TEXT PRIMARY KEY,
+                        lowest_price REAL NOT NULL,
+                        last_price REAL NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
                 columns = {
                     row[1]
                     for row in connection.execute("PRAGMA table_info(sent_offers)")
@@ -57,6 +67,47 @@ class SQLiteOfferStore:
                         connection.execute(
                             f"ALTER TABLE sent_offers ADD COLUMN {column} {definition}"
                         )
+
+    def record_price(self, asin: str, current_price: float) -> bool:
+        normalized_asin = _normalize_asin(asin)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT lowest_price FROM price_history WHERE asin = ?",
+                    (normalized_asin,),
+                ).fetchone()
+                if row is None:
+                    connection.execute(
+                        """
+                        INSERT INTO price_history
+                            (asin, lowest_price, last_price, updated_at)
+                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        """,
+                        (normalized_asin, current_price, current_price),
+                    )
+                    return False
+
+                is_new_lowest = current_price < row[0]
+                if is_new_lowest:
+                    connection.execute(
+                        """
+                        UPDATE price_history
+                        SET lowest_price = ?, last_price = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE asin = ?
+                        """,
+                        (current_price, current_price, normalized_asin),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE price_history
+                        SET last_price = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE asin = ?
+                        """,
+                        (current_price, normalized_asin),
+                    )
+        return is_new_lowest
 
     def has_been_sent(self, asin: str) -> bool:
         normalized_asin = _normalize_asin(asin)

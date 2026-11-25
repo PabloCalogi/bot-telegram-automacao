@@ -9,6 +9,59 @@ from app.storage import SQLiteOfferStore
 
 
 class SQLiteOfferStoreTests(unittest.TestCase):
+    def test_first_price_read_returns_false_and_creates_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+
+            self.assertFalse(store.record_price("b000000001", 80.0))
+
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                row = connection.execute(
+                    """
+                    SELECT lowest_price, last_price, updated_at
+                    FROM price_history WHERE asin = ?
+                    """,
+                    ("B000000001",),
+                ).fetchone()
+            self.assertEqual(row[:2], (80.0, 80.0))
+            self.assertTrue(row[2])
+
+    def test_higher_or_equal_price_does_not_set_new_low(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+
+            self.assertFalse(store.record_price("B000000001", 80.0))
+            self.assertFalse(store.record_price("B000000001", 85.0))
+            self.assertFalse(store.record_price("B000000001", 80.0))
+
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                row = connection.execute(
+                    "SELECT lowest_price, last_price FROM price_history WHERE asin = ?",
+                    ("B000000001",),
+                ).fetchone()
+            self.assertEqual(row, (80.0, 80.0))
+
+    def test_lower_price_updates_history_and_returns_true(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+
+            self.assertFalse(store.record_price("B000000001", 80.0))
+            self.assertTrue(store.record_price("B000000001", 75.0))
+
+            with closing(sqlite3.connect(store.db_path)) as connection:
+                row = connection.execute(
+                    """
+                    SELECT lowest_price, last_price, updated_at
+                    FROM price_history WHERE asin = ?
+                    """,
+                    ("B000000001",),
+                ).fetchone()
+            self.assertEqual(row[:2], (75.0, 75.0))
+            self.assertTrue(row[2])
+
     def test_records_asin_once_and_normalizes_case(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
@@ -46,6 +99,7 @@ class SQLiteOfferStoreTests(unittest.TestCase):
 
             store = SQLiteOfferStore(db_path)
             store.initialize()
+            self.assertFalse(store.record_price("B000000003", 89.0))
             legacy_offer = store.get_offer("B000000001")
             self.assertIsNotNone(legacy_offer)
             self.assertIsNone(legacy_offer.message_id)

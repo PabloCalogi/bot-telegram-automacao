@@ -129,6 +129,33 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
         )
 
+    async def test_new_publication_marks_price_below_existing_history(self):
+        product = make_product(current_price=Decimal("75"))
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+        )
+        bot = self.make_bot()
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            store.record_price(product.asin, 80.0)
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    product.asin,
+                    bot,
+                    store,
+                    settings,
+                )
+
+        self.assertIs(result, ProcessResult.PUBLISHED)
+        self.assertIn(
+            "🚨 <b>MENOR PREÇO REGISTRADO</b>",
+            bot.send_message.await_args.kwargs["text"],
+        )
+
     async def test_uses_photo_when_product_image_is_available(self):
         product = make_product("https://images.example.test/product.jpg")
         summary = ExecutionSummary()
@@ -442,6 +469,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
                 price=Decimal("80"),
                 is_photo=False,
             )
+            store.record_price(product.asin, 80.0)
             with patch("app.publisher.fetch_product", return_value=product):
                 result = await process_product(
                     product.asin,
@@ -457,6 +485,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         edit_args = bot.edit_message_text.await_args.kwargs
         self.assertEqual(edit_args["message_id"], 42)
         self.assertIn("Por: R$ 75,00", edit_args["text"])
+        self.assertIn("🚨 <b>MENOR PREÇO REGISTRADO</b>", edit_args["text"])
         self.assertEqual(edit_args["parse_mode"], "HTML")
         self.assertIsNotNone(edit_args["reply_markup"])
         bot.send_message.assert_not_awaited()
@@ -644,6 +673,25 @@ class PublisherFormattingTests(unittest.TestCase):
         self.assertTrue(
             message.endswith(
                 "⚡ <i>Preço e estoque sujeitos a alteração pela Amazon.</i>"
+            )
+        )
+
+    def test_lowest_price_badge_is_optional(self):
+        product = make_product()
+        analysis = analyze_discount(product, Decimal("15"))
+
+        message_without_badge = format_offer_message(product, analysis)
+        message_with_badge = format_offer_message(
+            product,
+            analysis,
+            is_lowest_price=True,
+        )
+
+        self.assertNotIn("🚨 <b>MENOR PREÇO REGISTRADO</b>", message_without_badge)
+        self.assertTrue(
+            message_with_badge.startswith(
+                "🚨 <b>MENOR PREÇO REGISTRADO</b>\n\n"
+                "🔥 <b>OFERTA NO CLUBE DO MAGO</b>"
             )
         )
 

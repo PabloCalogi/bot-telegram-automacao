@@ -64,6 +64,7 @@ def _format_brl(value: Decimal) -> str:
 def format_offer_message(
     product: Product,
     analysis: DiscountAnalysis,
+    is_lowest_price: bool = False,
 ) -> str:
     if (
         not analysis.approved
@@ -79,20 +80,21 @@ def format_offer_message(
     discount = analysis.discount_percent.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     saved_amount = product.original_price - product.current_price
 
-    return "\n".join(
-        (
-            "🔥 <b>OFERTA NO CLUBE DO MAGO</b>",
-            "",
-            f"📦 <b>{html.escape(title)}</b>",
-            "",
-            f"❌ De: <s>R$ {_format_brl(product.original_price)}</s>",
-            f"✅ <b>Por: R$ {_format_brl(product.current_price)}</b>",
-            f"📉 <b>{discount}% OFF</b> "
-            f"(Economize R$ {_format_brl(saved_amount)})",
-            "",
-            "⚡ <i>Preço e estoque sujeitos a alteração pela Amazon.</i>",
-        )
-    )
+    lines = [
+        "🔥 <b>OFERTA NO CLUBE DO MAGO</b>",
+        "",
+        f"📦 <b>{html.escape(title)}</b>",
+        "",
+        f"❌ De: <s>R$ {_format_brl(product.original_price)}</s>",
+        f"✅ <b>Por: R$ {_format_brl(product.current_price)}</b>",
+        f"📉 <b>{discount}% OFF</b> "
+        f"(Economize R$ {_format_brl(saved_amount)})",
+        "",
+        "⚡ <i>Preço e estoque sujeitos a alteração pela Amazon.</i>",
+    ]
+    if is_lowest_price:
+        lines[0:0] = ["🚨 <b>MENOR PREÇO REGISTRADO</b>", ""]
+    return "\n".join(lines)
 
 
 def _build_reply_markup(product: Product, settings: Settings) -> InlineKeyboardMarkup:
@@ -107,8 +109,9 @@ async def publish_offer(
     analysis: DiscountAnalysis,
     bot: Bot,
     settings: Settings,
+    is_lowest_price: bool = False,
 ) -> tuple[int, bool]:
-    message = format_offer_message(product, analysis)
+    message = format_offer_message(product, analysis, is_lowest_price)
     reply_markup = _build_reply_markup(product, settings)
     is_photo = bool(product.image_url)
     published_message: Message | None = None
@@ -174,8 +177,9 @@ async def update_offer_message(
     is_photo: bool,
     bot: Bot,
     settings: Settings,
+    is_lowest_price: bool = False,
 ) -> None:
-    message = format_offer_message(product, analysis)
+    message = format_offer_message(product, analysis, is_lowest_price)
     reply_markup = _build_reply_markup(product, settings)
     while True:
         try:
@@ -260,6 +264,14 @@ async def process_product(
         if stored_offer is not None:
             store.remove_offer(product.asin)
         return ProcessResult.IGNORED
+    if product.current_price is None:
+        raise RuntimeError(
+            f"Oferta aprovada sem preço atual para o ASIN {product.asin}."
+        )
+    is_lowest_price = store.record_price(
+        product.asin,
+        float(product.current_price),
+    )
     if stored_offer is not None and stored_offer.message_id is not None:
         if stored_offer.price is None:
             logger.warning(
@@ -281,6 +293,7 @@ async def process_product(
             stored_offer.is_photo,
             bot,
             settings,
+            is_lowest_price=is_lowest_price,
         )
         if not store.update_price(product.asin, product.current_price):
             raise RuntimeError(
@@ -292,7 +305,13 @@ async def process_product(
         logger.info("Oferta já enviada; ignorando ASIN %s.", product.asin)
         return ProcessResult.IGNORED
 
-    message_id, is_photo = await publish_offer(product, analysis, bot, settings)
+    message_id, is_photo = await publish_offer(
+        product,
+        analysis,
+        bot,
+        settings,
+        is_lowest_price=is_lowest_price,
+    )
     await asyncio.sleep(PUBLISH_DELAY_SECONDS)
     if not store.record_sent(
         product.asin,
