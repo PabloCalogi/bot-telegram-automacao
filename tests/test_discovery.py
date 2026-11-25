@@ -85,8 +85,8 @@ class AmazonDiscoveryTests(unittest.TestCase):
             products = extract_discovered_asins(page_html)
 
         self.assertEqual(products, [])
-        self.assertIn("nota abaixo da mínima", logs.output[0])
-        self.assertIn("avaliações abaixo do mínimo", logs.output[1])
+        self.assertIn("nota 4.2 abaixo de 4.3", logs.output[0])
+        self.assertIn("49 avaliações; mínimo 50", logs.output[1])
 
     def test_accepts_universal_product_meeting_quality_and_price_limits(self):
         page_html = product_card(
@@ -98,6 +98,44 @@ class AmazonDiscoveryTests(unittest.TestCase):
         )
 
         self.assertEqual(extract_discovered_asins(page_html), ["B000000013"])
+
+    def test_logs_category_status_discard_reasons_and_approved_count(self):
+        page_html = (
+            product_card("B000000014", "80,00")
+            + product_card("B000000015", "80,00", title="Aparelho 220V")
+            + product_card("B000000016", "29,99")
+            + product_card("B000000017", "80,00", rating=None)
+            + product_card("B000000018", "80,00", reviews=None)
+            + product_card("B000000019", "80,00", rating="4,2")
+            + product_card("B000000020", "80,00", reviews="49")
+        )
+
+        with (
+            patch(
+                "app.amazon.discovery._fetch_page",
+                return_value=(page_html, 200),
+            ),
+            self.assertLogs("app.amazon.discovery", level="INFO") as logs,
+        ):
+            products = discover_products(
+                (),
+                category_urls=("bestsellers-test",),
+            )
+
+        self.assertEqual(products, ("B000000014",))
+        self.assertIn("status HTTP: pendente", logs.output[0])
+        category_summary = logs.output[-1]
+        self.assertIn("Fim categoria Mais Vendidos bestsellers-test", category_summary)
+        self.assertIn("status HTTP: 200", category_summary)
+        self.assertIn("CAPTCHA/bloqueio: não detetado", category_summary)
+        self.assertIn("cards encontrados: 7", category_summary)
+        self.assertIn("preço: 1", category_summary)
+        self.assertIn("voltagem: 1", category_summary)
+        self.assertIn("nota ausente: 1", category_summary)
+        self.assertIn("nota abaixo do mínimo: 1", category_summary)
+        self.assertIn("avaliações ausentes: 1", category_summary)
+        self.assertIn("avaliações abaixo do mínimo: 1", category_summary)
+        self.assertIn("ASINs aprovados: 1", category_summary)
 
     def test_excludes_fixed_asins_deduplicates_and_obeys_max_items(self):
         first_page = (

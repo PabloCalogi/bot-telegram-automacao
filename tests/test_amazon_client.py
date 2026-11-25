@@ -61,7 +61,7 @@ class AmazonClientTests(unittest.TestCase):
             get.call_args.kwargs["headers"],
             {"Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"},
         )
-        self.assertEqual(get.call_args.kwargs["impersonate"], "chrome120")
+        self.assertEqual(get.call_args.kwargs["impersonate"], "chrome124")
         self.assertFalse(get.call_args.kwargs["allow_redirects"])
 
     @patch("app.amazon.client.requests.get")
@@ -78,15 +78,29 @@ class AmazonClientTests(unittest.TestCase):
 
     @patch("app.amazon.client.requests.get")
     def test_fetch_product_stops_on_forbidden_or_unavailable(self, get):
-        for status_code in (403, 503):
-            with self.subTest(status_code=status_code):
-                get.reset_mock()
-                get.return_value = make_response(status_code)
-                with self.assertLogs("app.amazon.client", level="ERROR") as logs:
-                    with self.assertRaises(AmazonAccessBlocked):
-                        fetch_product("B000000001")
-                self.assertIn(f"HTTP {status_code}", logs.output[0])
-                get.assert_called_once()
+        with (
+            patch("app.amazon.client.time.sleep"),
+            patch("app.amazon.client.random.uniform", return_value=2.5),
+        ):
+            for status_code in (403, 503):
+                with self.subTest(status_code=status_code):
+                    get.reset_mock()
+                    get.side_effect = [
+                        make_response(status_code)
+                        for _ in range(3)
+                    ]
+                    with self.assertLogs("app.amazon.client", level="ERROR") as logs:
+                        with self.assertRaises(AmazonAccessBlocked):
+                            fetch_product("B000000001")
+                    self.assertIn(f"HTTP {status_code}", logs.output[0])
+                    self.assertEqual(get.call_count, 3)
+                    self.assertEqual(
+                        [
+                            request.kwargs["impersonate"]
+                            for request in get.call_args_list
+                        ],
+                        ["chrome124", "chrome120", "safari15_5"],
+                    )
 
     @patch("app.amazon.client.requests.get")
     def test_missing_current_price_raises_parse_error(self, get):
@@ -137,19 +151,59 @@ class AmazonClientTests(unittest.TestCase):
         self.assertFalse(product.in_stock)
         self.assertIsNone(product.current_price)
 
-    @patch("app.amazon.client.requests.get")
-    def test_detects_captcha_and_stops_without_retrying(self, get):
-        get.return_value = make_response(
-            200,
-            '<html><title>captcha challenge</title></html>',
+    def test_retries_captcha_and_missing_title_with_rotating_profiles(self):
+        incomplete_pages = (
+            '<html><title>validateCaptcha</title></html>',
+            '<html><title>Robot Check</title></html>',
+            '<html><body>Digite os caracteres</body></html>',
+            "<html><body>Resposta sem título de produto</body></html>",
         )
+        for incomplete_page in incomplete_pages:
+            with self.subTest(incomplete_page=incomplete_page):
+                with (
+                    patch(
+                        "app.amazon.client.requests.get",
+                        side_effect=[
+                            make_response(200, incomplete_page),
+                            make_response(200, PRODUCT_HTML),
+                        ],
+                    ) as get,
+                    patch("app.amazon.client.time.sleep") as sleep,
+                    patch(
+                        "app.amazon.client.random.uniform",
+                        return_value=2.5,
+                    ) as jitter,
+                ):
+                    product = fetch_product("B000000001")
 
-        with self.assertLogs("app.amazon.client", level="WARNING") as logs:
+                self.assertEqual(product.title, "Produto de teste")
+                self.assertEqual(get.call_count, 2)
+                self.assertEqual(
+                    [request.kwargs["impersonate"] for request in get.call_args_list],
+                    ["chrome124", "chrome120"],
+                )
+                jitter.assert_called_once_with(2, 5)
+                sleep.assert_called_once_with(2.5)
+
+    def test_stops_after_two_captcha_retries(self):
+        with (
+            patch(
+                "app.amazon.client.requests.get",
+                side_effect=[
+                    make_response(200, '<html><title>captcha challenge</title></html>')
+                    for _ in range(3)
+                ],
+            ) as get,
+            patch("app.amazon.client.time.sleep") as sleep,
+            patch("app.amazon.client.random.uniform", return_value=3),
+            self.assertLogs("app.amazon.client", level="WARNING") as logs,
+        ):
             with self.assertRaisesRegex(AmazonAccessBlocked, "CAPTCHA"):
                 fetch_product("B000000001")
 
-        self.assertIn("Bloqueio de CAPTCHA detectado", logs.output[0])
-        get.assert_called_once()
+        self.assertIn("Bloqueio de CAPTCHA/Robot Check detectado", logs.output[0])
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
 
     @patch("app.amazon.client.requests.get")
     def test_missing_original_price_and_image_are_reported_as_optional(self, get):

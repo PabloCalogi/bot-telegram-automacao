@@ -1,13 +1,18 @@
 import logging
+import logging
 import re
+from collections import Counter
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from bs4 import BeautifulSoup, Tag
 from curl_cffi import CurlError, requests
 
 from app.amazon.client import (
+    AmazonAccessBlocked,
     AmazonScrapingError,
     _get_response,
+    _is_amazon_block_page,
 )
 
 
@@ -43,6 +48,16 @@ REVIEW_COUNT_PATTERN = re.compile(
     r"([\d][\d.,\s]*)\s*(?:avaliações?|reviews?|ratings?)\b",
     re.IGNORECASE,
 )
+HTTP_STATUS_PATTERN = re.compile(r"\bHTTP\s+(\d{3})\b", re.IGNORECASE)
+
+
+@dataclass
+class _CategoryStats:
+    cards_found: int = 0
+    discarded: Counter[str] = field(default_factory=Counter)
+    approved: int = 0
+    captcha_detected: bool = False
+    status_code: int | None = None
 
 
 def _normalize_asin(identifier: str) -> str | None:
@@ -118,39 +133,54 @@ def _quality_rejection_reason(
     card: Tag,
     min_rating: Decimal,
     min_reviews: int,
-) -> str | None:
+) -> tuple[str, str] | None:
     title = _title_from_card(card)
     if "bivolt" not in title.casefold() and VOLTAGE_PATTERN.search(title):
-        return "voltagem no título"
+        return "voltagem", "voltagem no título"
     if CLOTHING_PATTERN.search(title):
-        return "tamanho/vestuário"
+        return "tamanho/vestuário", "tamanho/vestuário no título"
 
     rating = _rating_from_card(card)
-    if rating is None or rating < min_rating:
-        return f"nota abaixo da mínima ({rating if rating is not None else 'ausente'})"
+    if rating is None:
+        return "nota ausente", "nota ausente no card"
+    if rating < min_rating:
+        return "nota abaixo do mínimo", f"nota {rating} abaixo de {min_rating}"
 
     reviews = _review_count_from_card(card)
-    if reviews is None or reviews < min_reviews:
-        return (
-            "avaliações abaixo do mínimo "
-            f"({reviews if reviews is not None else 'ausentes'})"
-        )
+    if reviews is None:
+        return "avaliações ausentes", "avaliações ausentes no card"
+    if reviews < min_reviews:
+        return "avaliações abaixo do mínimo", f"{reviews} avaliações; mínimo {min_reviews}"
     return None
 
 
-def extract_discovered_asins(
+def _record_rejection(
+    stats: _CategoryStats,
+    asin: str,
+    category: str,
+    detail: str,
+) -> None:
+    stats.discarded[category] += 1
+    logger.info("Produto %s descartado: %s.", asin, detail)
+
+
+def _extract_discovered_asins(
     page_html: str,
     min_price: Decimal = DISCOVERY_MIN_PRICE,
     max_price: Decimal = DISCOVERY_MAX_PRICE,
     min_rating: Decimal = DISCOVERY_MIN_RATING,
     min_reviews: int = DISCOVERY_MIN_REVIEWS,
+    *,
+    stats: _CategoryStats,
 ) -> list[str]:
     soup = BeautifulSoup(page_html, "html.parser")
     discovered: list[str] = []
     seen: set[str] = set()
     processed_cards: set[int] = set()
+    asin_cards = soup.select("[data-asin]")
+    stats.cards_found = len(asin_cards)
 
-    for card in soup.select("[data-asin]"):
+    for card in asin_cards:
         processed_cards.add(id(card))
         asin_value = card.get("data-asin")
         asin = _normalize_asin(asin_value) if isinstance(asin_value, str) else None
@@ -160,15 +190,24 @@ def extract_discovered_asins(
                 if match is not None:
                     asin = match.group(1).upper()
                     break
-        if asin is None or asin in seen:
+        if asin is None:
+            stats.discarded["ASIN inválido"] += 1
+            continue
+        if asin in seen:
             continue
 
         price = _price_from_card(card)
         if price is None or not min_price <= price <= max_price:
+            _record_rejection(
+                stats,
+                asin,
+                "preço",
+                "preço ausente ou fora da faixa configurada",
+            )
             continue
-        rejection_reason = _quality_rejection_reason(card, min_rating, min_reviews)
-        if rejection_reason is not None:
-            logger.info("Produto %s descartado: %s.", asin, rejection_reason)
+        rejection = _quality_rejection_reason(card, min_rating, min_reviews)
+        if rejection is not None:
+            _record_rejection(stats, asin, *rejection)
             continue
         seen.add(asin)
         discovered.append(asin)
@@ -187,34 +226,113 @@ def extract_discovered_asins(
             continue
         if id(card) in processed_cards:
             continue
+        processed_cards.add(id(card))
+        stats.cards_found += 1
         price = _price_from_card(card)
         if price is None or not min_price <= price <= max_price:
+            _record_rejection(
+                stats,
+                asin,
+                "preço",
+                "preço ausente ou fora da faixa configurada",
+            )
             continue
-        rejection_reason = _quality_rejection_reason(card, min_rating, min_reviews)
-        if rejection_reason is not None:
-            logger.info("Produto %s descartado: %s.", asin, rejection_reason)
+        rejection = _quality_rejection_reason(card, min_rating, min_reviews)
+        if rejection is not None:
+            _record_rejection(stats, asin, *rejection)
             continue
         seen.add(asin)
         discovered.append(asin)
 
+    stats.approved = len(discovered)
     return discovered
 
 
-def _fetch_page(url: str) -> str:
+def extract_discovered_asins(
+    page_html: str,
+    min_price: Decimal = DISCOVERY_MIN_PRICE,
+    max_price: Decimal = DISCOVERY_MAX_PRICE,
+    min_rating: Decimal = DISCOVERY_MIN_RATING,
+    min_reviews: int = DISCOVERY_MIN_REVIEWS,
+) -> list[str]:
+    return _extract_discovered_asins(
+        page_html,
+        min_price,
+        max_price,
+        min_rating,
+        min_reviews,
+        stats=_CategoryStats(),
+    )
+
+
+def _fetch_page(url: str) -> tuple[str, int]:
     response = None
     try:
         response = _get_response(url)
+        if _is_amazon_block_page(response.text):
+            raise AmazonAccessBlocked(
+                f"Bloqueio/CAPTCHA detectado na resposta HTTP "
+                f"{response.status_code}."
+            )
         response.raise_for_status()
-        return response.text
+        return response.text, response.status_code
     except AmazonScrapingError:
         raise
     except (requests.exceptions.RequestException, CurlError) as exc:
+        status = (
+            f" HTTP {response.status_code}"
+            if response is not None and response.status_code >= 400
+            else ""
+        )
         raise AmazonScrapingError(
-            f"Falha ao consultar página de descoberta ({type(exc).__name__})."
+            f"Falha ao consultar página de descoberta{status} "
+            f"({type(exc).__name__})."
         ) from exc
     finally:
         if response is not None:
             response.close()
+
+
+def _log_category_summary(
+    phase: str,
+    url: str,
+    stats: _CategoryStats,
+) -> None:
+    if phase == "Início":
+        status = "pendente"
+        captcha = "pendente"
+        cards_found = "pendente"
+        discarded = "pendente"
+        approved = "pendente"
+    else:
+        discarded = ", ".join(
+            f"{reason}: {count}" for reason, count in sorted(stats.discarded.items())
+        ) or "nenhum"
+        status = (
+            str(stats.status_code)
+            if stats.status_code is not None
+            else "não recebido"
+        )
+        captcha = "sim" if stats.captcha_detected else "não detetado"
+        cards_found = str(stats.cards_found)
+        approved = str(stats.approved)
+    logger.info(
+        "%s categoria Mais Vendidos %s | status HTTP: %s | CAPTCHA/bloqueio: %s | "
+        "cards encontrados: %s | descartados por motivo: %s | ASINs aprovados: %s",
+        phase,
+        url,
+        status,
+        captcha,
+        cards_found,
+        discarded,
+        approved,
+    )
+
+
+def _record_error_status(error: AmazonScrapingError, stats: _CategoryStats) -> None:
+    status_match = HTTP_STATUS_PATTERN.search(str(error))
+    if status_match is not None:
+        stats.status_code = int(status_match.group(1))
 
 
 def discover_products(
@@ -250,17 +368,52 @@ def discover_products(
     seen = set(excluded)
 
     for url in category_urls:
-        for asin in extract_discovered_asins(
-            _fetch_page(url),
-            min_price=min_price,
-            max_price=max_price,
-            min_rating=min_rating,
-            min_reviews=min_reviews,
-        ):
-            if asin in seen:
-                continue
-            seen.add(asin)
-            discovered.append(asin)
-            if len(discovered) >= max_items:
-                return tuple(discovered)
+        stats = _CategoryStats()
+        _log_category_summary("Início", url, stats)
+        try:
+            fetched_page = _fetch_page(url)
+            if isinstance(fetched_page, tuple):
+                page_html, stats.status_code = fetched_page
+            else:
+                page_html = fetched_page
+
+            stats.captcha_detected = _is_amazon_block_page(page_html)
+            if stats.captcha_detected:
+                raise AmazonAccessBlocked("Bloqueio/CAPTCHA detectado na categoria.")
+
+            category_asins = _extract_discovered_asins(
+                page_html,
+                min_price=min_price,
+                max_price=max_price,
+                min_rating=min_rating,
+                min_reviews=min_reviews,
+                stats=stats,
+            )
+            stats.approved = 0
+            for asin in category_asins:
+                if asin in seen:
+                    _record_rejection(
+                        stats,
+                        asin,
+                        "ASIN fixo/duplicado",
+                        "ASIN fixo ou já encontrado em outra categoria",
+                    )
+                    continue
+                seen.add(asin)
+                discovered.append(asin)
+                stats.approved += 1
+                if len(discovered) >= max_items:
+                    break
+        except AmazonAccessBlocked as exc:
+            stats.captcha_detected = True
+            _record_error_status(exc, stats)
+            raise
+        except AmazonScrapingError as exc:
+            _record_error_status(exc, stats)
+            raise
+        finally:
+            _log_category_summary("Fim", url, stats)
+
+        if len(discovered) >= max_items:
+            break
     return tuple(discovered)

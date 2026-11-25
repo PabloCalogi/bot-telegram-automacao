@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 import re
 import time
 from decimal import Decimal, InvalidOperation
@@ -17,6 +18,8 @@ logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT_SECONDS = 15
 REQUEST_RETRIES = 2
 REQUEST_RETRY_DELAY_SECONDS = 2
+BLOCK_PAGE_RETRIES = 2
+BLOCK_PAGE_RETRY_PROFILES = ("chrome124", "chrome120", "safari15_5")
 MAX_REDIRECTS = 3
 ASIN_PATTERN = re.compile(r"^[A-Z0-9]{10}$", re.IGNORECASE)
 ASIN_URL_PATTERN = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})(?:[/?]|$)", re.IGNORECASE)
@@ -68,6 +71,23 @@ class AmazonProductParseError(AmazonScrapingError):
     """Raised when required product data is missing or invalid."""
 
 
+class _AmazonProductTitleMissing(AmazonProductParseError):
+    """Raised when the product title is missing and a retry may be useful."""
+
+
+def _is_amazon_block_page(page_html: str) -> bool:
+    lowered_html = page_html.casefold()
+    return any(
+        marker in lowered_html
+        for marker in (
+            "validatecaptcha",
+            "robot check",
+            "digite os caracteres",
+            "captcha",
+        )
+    )
+
+
 def _validate_amazon_url(url: str) -> str:
     parsed = urlparse(url)
     hostname = (parsed.hostname or "").lower()
@@ -92,14 +112,18 @@ def _extract_asin(url: str) -> str | None:
     return match.group(1).upper() if match else None
 
 
-def _get_response(url: str) -> requests.Response:
+def _get_response(
+    url: str,
+    *,
+    impersonate: str = "chrome120",
+) -> requests.Response:
     current_url = url
     for redirect_count in range(MAX_REDIRECTS + 1):
         for attempt in range(REQUEST_RETRIES + 1):
             try:
                 response = requests.get(
                     current_url,
-                    impersonate="chrome120",
+                    impersonate=impersonate,
                     headers={"Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"},
                     timeout=REQUEST_TIMEOUT_SECONDS,
                     allow_redirects=False,
@@ -152,7 +176,7 @@ def _first_element(soup: BeautifulSoup, selectors: tuple[str, ...]):
 
 
 def _parse_brl_price(text: str) -> Decimal:
-    logger.warning(f"Texto bruto do preço capturado: {repr(text)}")
+    logger.debug("Texto bruto do preço capturado: %r", text)
     match = PRICE_PATTERN.search(" ".join(text.split()))
     
     if match is None:
@@ -282,14 +306,15 @@ def _get_image_url(
 
 
 def _parse_product(html: str, page_url: str, asin: str) -> Product:
+    if _is_amazon_block_page(html):
+        logger.warning("Bloqueio de CAPTCHA/Robot Check detectado.")
+        raise AmazonAccessBlocked("Bloqueio de CAPTCHA detectado.")
+
     soup = BeautifulSoup(html, "html.parser")
 
     title_element = soup.select_one("#productTitle")
     if title_element is None or not title_element.get_text(strip=True):
-        if "captcha" in html.casefold():
-            logger.warning("Bloqueio de CAPTCHA detectado; consulta interrompida.")
-            raise AmazonAccessBlocked("Bloqueio de CAPTCHA detectado.")
-        raise AmazonProductParseError("Tag de título do produto não encontrada.")
+        raise _AmazonProductTitleMissing("Tag de título do produto não encontrada.")
     title = " ".join(title_element.stripped_strings)
 
     availability_element = soup.select_one(
@@ -326,7 +351,7 @@ def _parse_product(html: str, page_url: str, asin: str) -> Product:
     original_price = None
     original_price_element = _first_element(soup, ORIGINAL_PRICE_SELECTORS)
     if original_price_element is None:
-        logger.warning("Tag do preço original não encontrada.")
+        logger.debug("Tag do preço original não encontrada.")
     else:
         try:
             original_price = _parse_brl_price(
@@ -347,30 +372,70 @@ def _parse_product(html: str, page_url: str, asin: str) -> Product:
 
 
 def fetch_product(identifier: str) -> Product:
-    """Fetch a product by ASIN or Amazon Brasil URL, without retrying blocked requests."""
+    """Fetch a product, retrying blocked or incomplete HTML with rotating profiles."""
     url = _normalize_identifier(identifier)
-    response = None
-    try:
-        response = _get_response(url)
-        response.raise_for_status()
-        asin = _extract_asin(response.url) or _extract_asin(url)
-        if asin is None:
-            raise AmazonProductParseError("ASIN não encontrado na URL do produto.")
-        return _parse_product(response.text, response.url, asin)
-    except AmazonProductParseError as exc:
-        logger.error("Não foi possível interpretar o produto em %s: %s", url, exc)
-        raise
-    except AmazonScrapingError:
-        raise
-    except (requests.exceptions.RequestException, CurlError) as exc:
-        logger.error(
-            "Falha na requisição à Amazon (%s): %s",
-            type(exc).__name__,
-            url,
-        )
-        raise AmazonScrapingError(
-            f"Falha na requisição à Amazon ({type(exc).__name__})."
-        ) from exc
-    finally:
-        if response is not None:
-            response.close()
+    for attempt in range(BLOCK_PAGE_RETRIES + 1):
+        response = None
+        retry_reason = ""
+        try:
+            response = _get_response(
+                url,
+                impersonate=BLOCK_PAGE_RETRY_PROFILES[
+                    attempt % len(BLOCK_PAGE_RETRY_PROFILES)
+                ],
+            )
+            if _is_amazon_block_page(response.text):
+                logger.warning("Bloqueio de CAPTCHA/Robot Check detectado.")
+                raise AmazonAccessBlocked(
+                    f"Bloqueio/CAPTCHA detectado na resposta HTTP "
+                    f"{response.status_code}."
+                )
+            response.raise_for_status()
+            asin = _extract_asin(response.url) or _extract_asin(url)
+            if asin is None:
+                raise AmazonProductParseError("ASIN não encontrado na URL do produto.")
+            return _parse_product(response.text, response.url, asin)
+        except (AmazonAccessBlocked, _AmazonProductTitleMissing) as exc:
+            if attempt == BLOCK_PAGE_RETRIES:
+                logger.error(
+                    "Bloqueio ou título ausente persistiu após %s tentativas (%s).",
+                    attempt + 1,
+                    type(exc).__name__,
+                )
+                raise
+            retry_reason = str(exc)
+            logger.warning(
+                "Resposta bloqueada/incompleta da Amazon; tentativa %s/%s será "
+                "repetida com outro perfil.",
+                attempt + 1,
+                BLOCK_PAGE_RETRIES,
+            )
+        except AmazonProductParseError as exc:
+            logger.error("Não foi possível interpretar o produto em %s: %s", url, exc)
+            raise
+        except AmazonScrapingError:
+            raise
+        except (requests.exceptions.RequestException, CurlError) as exc:
+            logger.error(
+                "Falha na requisição à Amazon (%s): %s",
+                type(exc).__name__,
+                url,
+            )
+            raise AmazonScrapingError(
+                f"Falha na requisição à Amazon ({type(exc).__name__})."
+            ) from exc
+        finally:
+            if response is not None:
+                response.close()
+
+        if retry_reason:
+            delay = random.uniform(2, 5)
+            logger.info(
+                "Nova tentativa após resposta incompleta (%s), aguardando %.2f "
+                "segundos.",
+                retry_reason,
+                delay,
+            )
+            time.sleep(delay)
+
+    raise AmazonScrapingError("Não foi possível concluir a consulta à Amazon.")
