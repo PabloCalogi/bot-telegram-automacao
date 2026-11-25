@@ -110,6 +110,7 @@ def main() -> None:
     except ValueError as exc:
         fatal = True
         summary.errors += 1
+        summary.record_error(exc)
         raise SystemExit(str(exc)) from exc
     except AmazonAccessBlocked as exc:
         fatal = True
@@ -118,6 +119,7 @@ def main() -> None:
     except TelegramError as exc:
         fatal = True
         summary.errors += 1
+        summary.record_error(exc)
         logger.error(
             "Falha na comunicação com o Telegram (%s).",
             type(exc).__name__,
@@ -126,6 +128,7 @@ def main() -> None:
     except Exception as exc:
         fatal = True
         summary.errors += 1
+        summary.record_error(exc)
         logger.error("Falha fatal no bot (%s).", type(exc).__name__)
         raise
     finally:

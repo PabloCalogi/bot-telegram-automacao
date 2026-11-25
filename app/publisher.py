@@ -2,7 +2,7 @@ import asyncio
 import html
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 from urllib.parse import urlencode
@@ -36,6 +36,25 @@ class ExecutionSummary:
     deleted: int = 0
     ignored: int = 0
     errors: int = 0
+    error_reasons: dict[str, int] = field(default_factory=dict)
+
+    def record_error(self, error: Exception) -> None:
+        message = " ".join(str(error).split())
+        status_match = re.search(r"\bHTTP\s+(\d{3})\b", message, re.IGNORECASE)
+        if status_match:
+            reason = f"HTTP {status_match.group(1)}"
+        elif any(
+            marker in message.casefold()
+            for marker in ("captcha", "bloqueio", "bloqueada", "bloqueado")
+        ):
+            reason = "Captcha/Bloqueio"
+        elif "timeout" in message.casefold() or "timed out" in message.casefold():
+            reason = "Timeout"
+        else:
+            reason = type(error).__name__
+            if message:
+                reason = f"{reason}: {message[:80]}"
+        self.error_reasons[reason] = self.error_reasons.get(reason, 0) + 1
 
 
 class ProcessResult(Enum):
@@ -241,10 +260,19 @@ async def send_health_alert_if_needed(
 ) -> None:
     error_rate = summary.errors / summary.analyzed if summary.analyzed else 0
     if not admin_chat_id or not (
-        fatal or summary.errors >= 3 or error_rate >= 0.30
+        fatal
+        or summary.errors >= 3
+        or (summary.analyzed >= 5 and error_rate >= 0.30)
     ):
         return
 
+    top_errors = sorted(
+        summary.error_reasons.items(),
+        key=lambda item: (-item[1], item[0]),
+    )[:3]
+    error_details = ", ".join(
+        f"{html.escape(reason)} ({count})" for reason, count in top_errors
+    ) or "Nenhum motivo registrado"
     message = (
         "⚠️ <b>ALERTA DE SAÚDE DO CLUBE DO MAGO</b>\n"
         "Possível bloqueio da Amazon ou falha no bot.\n\n"
@@ -254,7 +282,8 @@ async def send_health_alert_if_needed(
         f"Atualizados: {summary.updated} | "
         f"Excluídos: {summary.deleted} | "
         f"Ignorados: {summary.ignored} | "
-        f"Erros: {summary.errors}"
+        f"Erros: {summary.errors}\n"
+        f"Principais erros: {error_details}"
     )
     try:
         async with Bot(token=telegram_bot_token) as bot:
@@ -401,15 +430,18 @@ async def monitor_offers(
                         summary.deleted += 1
                     else:
                         summary.ignored += 1
-                except AmazonAccessBlocked:
+                except AmazonAccessBlocked as exc:
                     summary.errors += 1
+                    summary.record_error(exc)
                     logger.error("Bloqueio da Amazon; interrompendo o monitoramento.")
                     raise
                 except AmazonScrapingError as exc:
                     summary.errors += 1
+                    summary.record_error(exc)
                     logger.warning("Consulta ignorada para %s: %s", identifier, exc)
                 except TelegramError as exc:
                     summary.errors += 1
+                    summary.record_error(exc)
                     logger.error(
                         "Erro do Telegram ao processar %s (%s).",
                         identifier,

@@ -386,6 +386,10 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.deleted, 1)
         self.assertEqual(summary.ignored, 1)
         self.assertEqual(summary.errors, 1)
+        self.assertEqual(
+            summary.error_reasons,
+            {"AmazonScrapingError: consulta falhou": 1},
+        )
         self.assertEqual(process_mock.await_count, 5)
         store_class.return_value.initialize.assert_called_once()
 
@@ -500,13 +504,14 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_health_alert_is_sent_when_error_threshold_is_reached(self):
         summary = ExecutionSummary(
-            analyzed=10,
+            analyzed=2,
             with_image=4,
             published=2,
             updated=1,
             deleted=1,
             ignored=3,
             errors=3,
+            error_reasons={"HTTP 503": 2, "Timeout": 1},
         )
         with patch("app.publisher.Bot") as bot_class:
             bot = bot_class.return_value
@@ -521,15 +526,37 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args["chat_id"], "123456")
         self.assertEqual(args["parse_mode"], "HTML")
         for expected in (
-            "Analisados: 10",
+            "Analisados: 2",
             "Com imagem: 4",
             "Publicados: 2",
             "Atualizados: 1",
             "Excluídos: 1",
             "Ignorados: 3",
             "Erros: 3",
+            "Principais erros: HTTP 503 (2), Timeout (1)",
         ):
             self.assertIn(expected, args["text"])
+
+    async def test_health_alert_ignores_single_error_in_small_sample(self):
+        summary = ExecutionSummary(analyzed=1, errors=1)
+
+        with patch("app.publisher.Bot") as bot_class:
+            await send_health_alert_if_needed(summary, "token", "123456")
+
+        bot_class.assert_not_called()
+
+    async def test_health_alert_uses_error_rate_for_sufficient_sample(self):
+        summary = ExecutionSummary(analyzed=5, errors=2)
+
+        with patch("app.publisher.Bot") as bot_class:
+            bot = bot_class.return_value
+            bot.__aenter__ = AsyncMock(return_value=bot)
+            bot.__aexit__ = AsyncMock(return_value=False)
+            bot.send_message = AsyncMock()
+
+            await send_health_alert_if_needed(summary, "token", "123456")
+
+        bot.send_message.assert_awaited_once()
 
     async def test_health_alert_is_not_sent_when_execution_is_healthy(self):
         summary = ExecutionSummary(analyzed=10, errors=1)
@@ -540,7 +567,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         bot_class.assert_not_called()
 
     async def test_health_alert_delivery_failure_does_not_propagate(self):
-        summary = ExecutionSummary(analyzed=3, errors=1)
+        summary = ExecutionSummary(analyzed=3, errors=3)
         with (
             patch("app.publisher.Bot") as bot_class,
             self.assertLogs("app.publisher", level="WARNING"),
