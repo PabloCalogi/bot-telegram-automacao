@@ -41,9 +41,9 @@ jobs:
           AMAZON_ASSOCIATE_TAG: ${{ secrets.AMAZON_ASSOCIATE_TAG }}
           MIN_DISCOUNT_PERCENT: ${{ secrets.MIN_DISCOUNT_PERCENT }}
           ENABLE_AUTO_DISCOVERY: ${{ secrets.ENABLE_AUTO_DISCOVERY }}
-          DISCOVERY_MAX_ITEMS: ${{ secrets.DISCOVERY_MAX_ITEMS }}
-          DISCOVERY_MIN_PRICE: ${{ secrets.DISCOVERY_MIN_PRICE }}
-          DISCOVERY_MAX_PRICE: ${{ secrets.DISCOVERY_MAX_PRICE }}
+          DISCOVERY_MAX_ITEMS: "10"
+          DISCOVERY_MIN_PRICE: "30"
+          DISCOVERY_MAX_PRICE: "200"
         run: python -m app.main --once
 
       - name: Salvar banco de ofertas atualizado
