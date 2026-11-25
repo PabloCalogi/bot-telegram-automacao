@@ -78,6 +78,8 @@ def main() -> None:
                         max_items=settings.discovery_max_items,
                         min_price=settings.discovery_min_price,
                         max_price=settings.discovery_max_price,
+                        min_rating=settings.discovery_min_rating,
+                        min_reviews=settings.discovery_min_reviews,
                     )
                 except AmazonScrapingError as exc:
                     logger.warning(

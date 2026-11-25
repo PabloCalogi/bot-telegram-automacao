@@ -7,7 +7,7 @@ Bot automatizado em Python para monitorar ofertas na **Amazon Brasil**, aplicar 
 ## ✨ Funcionalidades
 
 - **Monitoramento Curado (`products.txt`)**: acompanha uma lista fixa de ASINs selecionados (produtos universais e de giro rápido).
-- **Descoberta Automática de Ofertas (Opcional)**: varre páginas de *Mais Vendidos* da Amazon Brasil para encontrar novos ASINs em promoção dentro de uma faixa de preço configurável (`DISCOVERY_MIN_PRICE` a `DISCOVERY_MAX_PRICE`).
+- **Descoberta Automática de Ofertas (Opcional)**: varre páginas de *Mais Vendidos* da Amazon Brasil para encontrar novos ASINs em promoção dentro de uma faixa de preço configurável, filtrando também voltagem, vestuário, nota e volume de avaliações.
 - **Publicação Rica no Telegram**: envia foto do produto, preço original riscado, preço atual, percentual de desconto e botão inline com a tag de afiliado (`AMAZON_ASSOCIATE_TAG`).
 - **Atualização e Exclusão Automática**:
   - Salva `message_id`, preço e tipo de mídia no **SQLite** (`data/offers.sqlite3`).
@@ -64,6 +64,8 @@ Crie um arquivo `.env` na raiz do projeto (baseado no `.env.example`) e configur
 | `DISCOVERY_MAX_ITEMS` | Não | `10` | Limite de novos ASINs descobertos por execução |
 | `DISCOVERY_MIN_PRICE` | Não | `30` | Preço mínimo (R$) para itens da descoberta automática |
 | `DISCOVERY_MAX_PRICE` | Não | `200` | Preço máximo (R$) para itens da descoberta automática |
+| `DISCOVERY_MIN_RATING` | Não | `4.3` | Nota mínima (de 5) para itens descobertos |
+| `DISCOVERY_MIN_REVIEWS` | Não | `50` | Número mínimo de avaliações para itens descobertos |
 
 > **Dica:** Para receber alertas de saúde, abra uma conversa privada com o seu bot no Telegram e clique em **Iniciar (`/start`)** antes de ativar o `TELEGRAM_ADMIN_CHAT_ID`.
 

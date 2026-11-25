@@ -464,6 +464,8 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             max_items=10,
             min_price=Decimal("30.0"),
             max_price=Decimal("200.0"),
+            min_rating=Decimal("4.3"),
+            min_reviews=50,
         )
         monitored_settings = monitor_mock.call_args.args[0]
         self.assertEqual(

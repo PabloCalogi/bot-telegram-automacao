@@ -5,10 +5,27 @@ from unittest.mock import call, patch
 from app.amazon.discovery import discover_products, extract_discovered_asins
 
 
-def product_card(asin: str, price: str) -> str:
+def product_card(
+    asin: str,
+    price: str,
+    title: str = "Produto universal",
+    rating: str | None = "4,5",
+    reviews: str | None = "100",
+) -> str:
+    rating_html = (
+        f'<span class="a-icon-alt">{rating} de 5 estrelas</span>'
+        if rating is not None
+        else ""
+    )
+    reviews_html = (
+        f'<span class="a-size-small">{reviews}</span>'
+        if reviews is not None
+        else ""
+    )
     return (
         f'<div data-asin="{asin}">'
-        f'<a href="/dp/{asin}">Produto</a>'
+        f'<a href="/dp/{asin}"><span class="product-title">{title}</span></a>'
+        f"{rating_html}{reviews_html}"
         f'<span class="a-price"><span class="a-offscreen">R$ {price}</span></span>'
         "</div>"
     )
@@ -33,6 +50,54 @@ class AmazonDiscoveryTests(unittest.TestCase):
             ),
             ["B000000001", "B000000002"],
         )
+
+    def test_rejects_voltage_titles_except_bivolt(self):
+        page_html = (
+            product_card("B000000007", "80,00", title="Aparelho 220V")
+            + product_card(
+                "B000000008",
+                "80,00",
+                title="Aparelho 127V/220V Bivolt",
+            )
+        )
+
+        self.assertEqual(extract_discovered_asins(page_html), ["B000000008"])
+
+    def test_rejects_clothing_and_shoe_titles(self):
+        page_html = (
+            product_card("B000000009", "80,00", title="Tênis esportivo")
+            + product_card(
+                "B000000010",
+                "80,00",
+                title="Camiseta Tamanho M",
+            )
+        )
+
+        self.assertEqual(extract_discovered_asins(page_html), [])
+
+    def test_rejects_low_rating_or_insufficient_reviews(self):
+        page_html = (
+            product_card("B000000011", "80,00", rating="4,2", reviews="100")
+            + product_card("B000000012", "80,00", rating="4,5", reviews="49")
+        )
+
+        with self.assertLogs("app.amazon.discovery", level="INFO") as logs:
+            products = extract_discovered_asins(page_html)
+
+        self.assertEqual(products, [])
+        self.assertIn("nota abaixo da mínima", logs.output[0])
+        self.assertIn("avaliações abaixo do mínimo", logs.output[1])
+
+    def test_accepts_universal_product_meeting_quality_and_price_limits(self):
+        page_html = product_card(
+            "B000000013",
+            "80,00",
+            title="Garrafa térmica universal",
+            rating="4,3",
+            reviews="50",
+        )
+
+        self.assertEqual(extract_discovered_asins(page_html), ["B000000013"])
 
     def test_excludes_fixed_asins_deduplicates_and_obeys_max_items(self):
         first_page = (

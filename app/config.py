@@ -9,7 +9,9 @@ from dotenv import load_dotenv
 from app.amazon.discovery import (
     DISCOVERY_MAX_ITEMS,
     DISCOVERY_MAX_PRICE,
+    DISCOVERY_MIN_RATING,
     DISCOVERY_MIN_PRICE,
+    DISCOVERY_MIN_REVIEWS,
 )
 
 
@@ -44,6 +46,8 @@ class Settings:
     discovery_max_items: int = DISCOVERY_MAX_ITEMS
     discovery_min_price: Decimal = DISCOVERY_MIN_PRICE
     discovery_max_price: Decimal = DISCOVERY_MAX_PRICE
+    discovery_min_rating: Decimal = DISCOVERY_MIN_RATING
+    discovery_min_reviews: int = DISCOVERY_MIN_REVIEWS
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -121,6 +125,38 @@ class Settings:
                 "com DISCOVERY_MAX_PRICE maior ou igual a DISCOVERY_MIN_PRICE."
             )
 
+        try:
+            discovery_min_rating = Decimal(
+                os.getenv(
+                    "DISCOVERY_MIN_RATING",
+                    str(DISCOVERY_MIN_RATING),
+                ).strip()
+            )
+        except InvalidOperation as exc:
+            raise ValueError(
+                "DISCOVERY_MIN_RATING deve ser um número entre 0 e 5."
+            ) from exc
+        if (
+            not discovery_min_rating.is_finite()
+            or discovery_min_rating < 0
+            or discovery_min_rating > 5
+        ):
+            raise ValueError("DISCOVERY_MIN_RATING deve estar entre 0 e 5.")
+
+        try:
+            discovery_min_reviews = int(
+                os.getenv(
+                    "DISCOVERY_MIN_REVIEWS",
+                    str(DISCOVERY_MIN_REVIEWS),
+                ).strip()
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "DISCOVERY_MIN_REVIEWS deve ser um inteiro não negativo."
+            ) from exc
+        if discovery_min_reviews < 0:
+            raise ValueError("DISCOVERY_MIN_REVIEWS deve ser um inteiro não negativo.")
+
         product_identifiers = _read_products_file()
         if not product_identifiers:
             product_identifiers = tuple(
@@ -143,4 +179,6 @@ class Settings:
             discovery_max_items=discovery_max_items,
             discovery_min_price=discovery_min_price,
             discovery_max_price=discovery_max_price,
+            discovery_min_rating=discovery_min_rating,
+            discovery_min_reviews=discovery_min_reviews,
         )

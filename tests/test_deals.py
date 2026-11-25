@@ -102,6 +102,8 @@ class DealAnalysisTests(unittest.TestCase):
             "DISCOVERY_MAX_ITEMS": "7",
             "DISCOVERY_MIN_PRICE": "35.5",
             "DISCOVERY_MAX_PRICE": "175",
+            "DISCOVERY_MIN_RATING": "4.6",
+            "DISCOVERY_MIN_REVIEWS": "75",
         }
 
         with TemporaryDirectory() as directory:
@@ -118,6 +120,26 @@ class DealAnalysisTests(unittest.TestCase):
         self.assertEqual(settings.discovery_max_items, 7)
         self.assertEqual(settings.discovery_min_price, Decimal("35.5"))
         self.assertEqual(settings.discovery_max_price, Decimal("175"))
+        self.assertEqual(settings.discovery_min_rating, Decimal("4.6"))
+        self.assertEqual(settings.discovery_min_reviews, 75)
+
+    def test_uses_default_discovery_quality_thresholds(self):
+        environment = {
+            "TELEGRAM_BOT_TOKEN": "test-token",
+            "TELEGRAM_CHANNEL_ID": "@test-channel",
+        }
+
+        with TemporaryDirectory() as directory:
+            products_file = Path(directory) / "missing-products.txt"
+            with (
+                patch("app.config.load_dotenv"),
+                patch.dict(os.environ, environment, clear=True),
+                patch("app.config.PRODUCTS_FILE", products_file),
+            ):
+                settings = Settings.from_env()
+
+        self.assertEqual(settings.discovery_min_rating, Decimal("4.3"))
+        self.assertEqual(settings.discovery_min_reviews, 50)
 
     def test_loads_products_file_ignoring_comments_blanks_and_duplicates(self):
         products = (
