@@ -93,6 +93,32 @@ class DealAnalysisTests(unittest.TestCase):
         )
         self.assertEqual(settings.poll_interval_seconds, 120)
 
+    def test_loads_optional_discovery_and_admin_settings(self):
+        environment = {
+            "TELEGRAM_BOT_TOKEN": "test-token",
+            "TELEGRAM_CHANNEL_ID": "@test-channel",
+            "TELEGRAM_ADMIN_CHAT_ID": "123456",
+            "ENABLE_AUTO_DISCOVERY": "1",
+            "DISCOVERY_MAX_ITEMS": "7",
+            "DISCOVERY_MIN_PRICE": "35.5",
+            "DISCOVERY_MAX_PRICE": "175",
+        }
+
+        with TemporaryDirectory() as directory:
+            products_file = Path(directory) / "missing-products.txt"
+            with (
+                patch("app.config.load_dotenv"),
+                patch.dict(os.environ, environment, clear=True),
+                patch("app.config.PRODUCTS_FILE", products_file),
+            ):
+                settings = Settings.from_env()
+
+        self.assertEqual(settings.telegram_admin_chat_id, "123456")
+        self.assertTrue(settings.enable_auto_discovery)
+        self.assertEqual(settings.discovery_max_items, 7)
+        self.assertEqual(settings.discovery_min_price, Decimal("35.5"))
+        self.assertEqual(settings.discovery_max_price, Decimal("175"))
+
     def test_loads_products_file_ignoring_comments_blanks_and_duplicates(self):
         products = (
             "# produtos para monitorar\n"

@@ -6,6 +6,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from app.amazon.discovery import (
+    DISCOVERY_MAX_ITEMS,
+    DISCOVERY_MAX_PRICE,
+    DISCOVERY_MIN_PRICE,
+)
+
 
 PRODUCTS_FILE = Path(__file__).resolve().parent.parent / "products.txt"
 
@@ -33,6 +39,11 @@ class Settings:
     amazon_associate_tag: str = ""
     product_identifiers: tuple[str, ...] = ()
     poll_interval_seconds: int = 3600
+    telegram_admin_chat_id: str = ""
+    enable_auto_discovery: bool = False
+    discovery_max_items: int = DISCOVERY_MAX_ITEMS
+    discovery_min_price: Decimal = DISCOVERY_MIN_PRICE
+    discovery_max_price: Decimal = DISCOVERY_MAX_PRICE
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -73,6 +84,43 @@ class Settings:
         if poll_interval_seconds < 60:
             raise ValueError("POLL_INTERVAL_SECONDS deve ser de pelo menos 60.")
 
+        enable_auto_discovery = (
+            os.getenv("ENABLE_AUTO_DISCOVERY", "false").strip().casefold()
+            in {"true", "1"}
+        )
+        try:
+            discovery_max_items = int(
+                os.getenv("DISCOVERY_MAX_ITEMS", str(DISCOVERY_MAX_ITEMS)).strip()
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "DISCOVERY_MAX_ITEMS deve ser um inteiro positivo."
+            ) from exc
+        if discovery_max_items < 1:
+            raise ValueError("DISCOVERY_MAX_ITEMS deve ser um inteiro positivo.")
+
+        try:
+            discovery_min_price = Decimal(
+                os.getenv("DISCOVERY_MIN_PRICE", str(DISCOVERY_MIN_PRICE)).strip()
+            )
+            discovery_max_price = Decimal(
+                os.getenv("DISCOVERY_MAX_PRICE", str(DISCOVERY_MAX_PRICE)).strip()
+            )
+        except InvalidOperation as exc:
+            raise ValueError(
+                "DISCOVERY_MIN_PRICE e DISCOVERY_MAX_PRICE devem ser números válidos."
+            ) from exc
+        if (
+            not discovery_min_price.is_finite()
+            or not discovery_max_price.is_finite()
+            or discovery_min_price < 0
+            or discovery_max_price < discovery_min_price
+        ):
+            raise ValueError(
+                "A faixa de descoberta deve ter preços finitos e não negativos, "
+                "com DISCOVERY_MAX_PRICE maior ou igual a DISCOVERY_MIN_PRICE."
+            )
+
         product_identifiers = _read_products_file()
         if not product_identifiers:
             product_identifiers = tuple(
@@ -90,4 +138,9 @@ class Settings:
             amazon_associate_tag=os.getenv("AMAZON_ASSOCIATE_TAG", "").strip(),
             product_identifiers=product_identifiers,
             poll_interval_seconds=poll_interval_seconds,
+            telegram_admin_chat_id=os.getenv("TELEGRAM_ADMIN_CHAT_ID", "").strip(),
+            enable_auto_discovery=enable_auto_discovery,
+            discovery_max_items=discovery_max_items,
+            discovery_min_price=discovery_min_price,
+            discovery_max_price=discovery_max_price,
         )

@@ -20,6 +20,7 @@ from app.publisher import (
     format_offer_message,
     monitor_offers,
     process_product,
+    send_health_alert_if_needed,
 )
 from app.storage import SQLiteOfferStore
 
@@ -429,6 +430,127 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             "Atualizados: 1 | Excluídos: 1 | Ignorados/Já enviados: 1 | Erros: 1",
             logs.output[-1],
         )
+
+    async def test_main_includes_discovered_products_when_enabled(self):
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            product_identifiers=("B000000001",),
+            enable_auto_discovery=True,
+        )
+
+        with (
+            patch("sys.argv", ["app.main", "--once"]),
+            patch("app.main.Settings.from_env", return_value=settings),
+            patch("app.main.ExecutionSummary", return_value=ExecutionSummary()),
+            patch(
+                "app.main.discover_products",
+                return_value=("B000000002",),
+            ) as discover_mock,
+            patch("app.main.monitor_offers", new_callable=AsyncMock) as monitor_mock,
+            patch(
+                "app.main.asyncio.run",
+                side_effect=lambda coroutine: coroutine.close(),
+            ),
+        ):
+            main()
+
+        discover_mock.assert_called_once_with(
+            ("B000000001",),
+            max_items=10,
+            min_price=Decimal("30.0"),
+            max_price=Decimal("200.0"),
+        )
+        monitored_settings = monitor_mock.call_args.args[0]
+        self.assertEqual(
+            monitored_settings.product_identifiers,
+            ("B000000001", "B000000002"),
+        )
+
+    async def test_main_continues_with_fixed_products_when_discovery_fails(self):
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            product_identifiers=("B000000001",),
+            enable_auto_discovery=True,
+        )
+
+        with (
+            patch("sys.argv", ["app.main", "--once"]),
+            patch("app.main.Settings.from_env", return_value=settings),
+            patch("app.main.ExecutionSummary", return_value=ExecutionSummary()),
+            patch(
+                "app.main.discover_products",
+                side_effect=AmazonScrapingError("blocked"),
+            ),
+            patch("app.main.monitor_offers", new_callable=AsyncMock) as monitor_mock,
+            patch(
+                "app.main.asyncio.run",
+                side_effect=lambda coroutine: coroutine.close(),
+            ),
+            self.assertLogs("app.main", level="WARNING") as logs,
+        ):
+            main()
+
+        self.assertIn("usando apenas produtos fixos", logs.output[0])
+        self.assertEqual(
+            monitor_mock.call_args.args[0].product_identifiers,
+            ("B000000001",),
+        )
+
+    async def test_health_alert_is_sent_when_error_threshold_is_reached(self):
+        summary = ExecutionSummary(
+            analyzed=10,
+            with_image=4,
+            published=2,
+            updated=1,
+            deleted=1,
+            ignored=3,
+            errors=3,
+        )
+        with patch("app.publisher.Bot") as bot_class:
+            bot = bot_class.return_value
+            bot.__aenter__ = AsyncMock(return_value=bot)
+            bot.__aexit__ = AsyncMock(return_value=False)
+            bot.send_message = AsyncMock()
+
+            await send_health_alert_if_needed(summary, "token", "123456")
+
+        bot.send_message.assert_awaited_once()
+        args = bot.send_message.await_args.kwargs
+        self.assertEqual(args["chat_id"], "123456")
+        self.assertEqual(args["parse_mode"], "HTML")
+        for expected in (
+            "Analisados: 10",
+            "Com imagem: 4",
+            "Publicados: 2",
+            "Atualizados: 1",
+            "Excluídos: 1",
+            "Ignorados: 3",
+            "Erros: 3",
+        ):
+            self.assertIn(expected, args["text"])
+
+    async def test_health_alert_is_not_sent_when_execution_is_healthy(self):
+        summary = ExecutionSummary(analyzed=10, errors=1)
+
+        with patch("app.publisher.Bot") as bot_class:
+            await send_health_alert_if_needed(summary, "token", "123456")
+
+        bot_class.assert_not_called()
+
+    async def test_health_alert_delivery_failure_does_not_propagate(self):
+        summary = ExecutionSummary(analyzed=3, errors=1)
+        with (
+            patch("app.publisher.Bot") as bot_class,
+            self.assertLogs("app.publisher", level="WARNING"),
+        ):
+            bot = bot_class.return_value
+            bot.__aenter__ = AsyncMock(return_value=bot)
+            bot.__aexit__ = AsyncMock(return_value=False)
+            bot.send_message = AsyncMock(side_effect=RuntimeError("delivery failed"))
+
+            await send_health_alert_if_needed(summary, "token", "123456")
 
     async def test_does_not_publish_discount_at_threshold(self):
         product = make_product(current_price=Decimal("85"))

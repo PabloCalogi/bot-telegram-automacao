@@ -232,6 +232,44 @@ async def delete_offer_message(
             return
 
 
+async def send_health_alert_if_needed(
+    summary: ExecutionSummary,
+    telegram_bot_token: str,
+    admin_chat_id: str,
+    *,
+    fatal: bool = False,
+) -> None:
+    error_rate = summary.errors / summary.analyzed if summary.analyzed else 0
+    if not admin_chat_id or not (
+        fatal or summary.errors >= 3 or error_rate >= 0.30
+    ):
+        return
+
+    message = (
+        "⚠️ <b>ALERTA DE SAÚDE DO CLUBE DO MAGO</b>\n"
+        "Possível bloqueio da Amazon ou falha no bot.\n\n"
+        f"Analisados: {summary.analyzed} | "
+        f"Com imagem: {summary.with_image} | "
+        f"Publicados: {summary.published} | "
+        f"Atualizados: {summary.updated} | "
+        f"Excluídos: {summary.deleted} | "
+        f"Ignorados: {summary.ignored} | "
+        f"Erros: {summary.errors}"
+    )
+    try:
+        async with Bot(token=telegram_bot_token) as bot:
+            await bot.send_message(
+                chat_id=admin_chat_id,
+                text=message,
+                parse_mode="HTML",
+            )
+    except Exception as exc:
+        logger.warning(
+            "Não foi possível enviar o alerta privado de saúde (%s).",
+            type(exc).__name__,
+        )
+
+
 async def process_product(
     identifier: str,
     bot: Bot,
