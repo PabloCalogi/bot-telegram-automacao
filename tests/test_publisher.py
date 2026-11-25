@@ -774,29 +774,108 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(result, ProcessResult.DELETED)
 
-    async def test_monitor_stops_when_amazon_returns_a_block(self):
+    async def test_monitor_continues_after_one_or_two_blocks_then_success(self):
+        for block_count in (1, 2):
+            with self.subTest(block_count=block_count):
+                settings = Settings(
+                    telegram_bot_token="token",
+                    telegram_channel_id="@canal",
+                    amazon_associate_tag="exemplo-20",
+                    product_identifiers=tuple(
+                        f"asin-{index}" for index in range(block_count + 1)
+                    ),
+                )
+                summary = ExecutionSummary()
+                side_effects = [
+                    AmazonAccessBlocked("HTTP 403")
+                    for _ in range(block_count)
+                ]
+                side_effects.append(ProcessResult.IGNORED)
+                with (
+                    patch("app.publisher.Bot") as bot_class,
+                    patch("app.publisher.SQLiteOfferStore") as store_class,
+                    patch(
+                        "app.publisher.process_product",
+                        new_callable=AsyncMock,
+                        side_effect=side_effects,
+                    ) as process_mock,
+                ):
+                    bot_context = bot_class.return_value
+                    bot_context.__aenter__ = AsyncMock(return_value=AsyncMock())
+                    bot_context.__aexit__ = AsyncMock(return_value=False)
+
+                    await monitor_offers(settings, run_once=True, summary=summary)
+
+                self.assertEqual(process_mock.await_count, block_count + 1)
+                self.assertEqual(summary.errors, block_count)
+                self.assertEqual(summary.ignored, 1)
+                store_class.return_value.initialize.assert_called_once()
+
+    async def test_successful_product_resets_consecutive_block_count(self):
         settings = Settings(
             telegram_bot_token="token",
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
-            product_identifiers=("B000000001",),
+            product_identifiers=tuple(f"asin-{index}" for index in range(6)),
         )
+        summary = ExecutionSummary()
         with (
             patch("app.publisher.Bot") as bot_class,
             patch("app.publisher.SQLiteOfferStore") as store_class,
             patch(
                 "app.publisher.process_product",
                 new_callable=AsyncMock,
-                side_effect=AmazonAccessBlocked("HTTP 403"),
-            ),
+                side_effect=[
+                    AmazonAccessBlocked("HTTP 403"),
+                    AmazonAccessBlocked("HTTP 403"),
+                    ProcessResult.IGNORED,
+                    AmazonAccessBlocked("HTTP 403"),
+                    AmazonAccessBlocked("HTTP 403"),
+                    ProcessResult.IGNORED,
+                ],
+            ) as process_mock,
+        ):
+            bot_context = bot_class.return_value
+            bot_context.__aenter__ = AsyncMock(return_value=AsyncMock())
+            bot_context.__aexit__ = AsyncMock(return_value=False)
+
+            await monitor_offers(settings, run_once=True, summary=summary)
+
+        self.assertEqual(process_mock.await_count, 6)
+        self.assertEqual(summary.errors, 4)
+        self.assertEqual(summary.ignored, 2)
+        store_class.return_value.initialize.assert_called_once()
+
+    async def test_monitor_stops_after_three_consecutive_amazon_blocks(self):
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+            product_identifiers=tuple(f"asin-{index}" for index in range(3)),
+        )
+        summary = ExecutionSummary()
+        with (
+            patch("app.publisher.Bot") as bot_class,
+            patch("app.publisher.SQLiteOfferStore") as store_class,
+            patch(
+                "app.publisher.process_product",
+                new_callable=AsyncMock,
+                side_effect=[
+                    AmazonAccessBlocked("HTTP 403")
+                    for _ in range(3)
+                ],
+            ) as process_mock,
         ):
             bot_context = bot_class.return_value
             bot_context.__aenter__ = AsyncMock(return_value=AsyncMock())
             bot_context.__aexit__ = AsyncMock(return_value=False)
 
             with self.assertRaises(AmazonAccessBlocked):
-                await monitor_offers(settings, run_once=True)
+                await monitor_offers(settings, run_once=True, summary=summary)
 
+        self.assertEqual(process_mock.await_count, 3)
+        self.assertEqual(summary.analyzed, 3)
+        self.assertEqual(summary.errors, 3)
         store_class.return_value.initialize.assert_called_once()
 
 

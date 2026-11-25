@@ -24,6 +24,7 @@ from app.storage import SQLiteOfferStore
 logger = logging.getLogger(__name__)
 REQUEST_DELAY_SECONDS = 1
 PUBLISH_DELAY_SECONDS = 3.0
+MAX_CONSECUTIVE_AMAZON_BLOCKS = 3
 ASIN_PATTERN = re.compile(r"^[A-Z0-9]{10}$", re.IGNORECASE)
 
 
@@ -410,6 +411,7 @@ async def monitor_offers(
     store = SQLiteOfferStore()
     store.initialize()
 
+    consecutive_amazon_blocks = 0
     async with Bot(token=settings.telegram_bot_token) as bot:
         while True:
             for identifier in settings.product_identifiers:
@@ -422,6 +424,7 @@ async def monitor_offers(
                         settings,
                         summary=summary,
                     )
+                    consecutive_amazon_blocks = 0
                     if result is ProcessResult.PUBLISHED:
                         summary.published += 1
                     elif result is ProcessResult.UPDATED:
@@ -433,13 +436,27 @@ async def monitor_offers(
                 except AmazonAccessBlocked as exc:
                     summary.errors += 1
                     summary.record_error(exc)
-                    logger.error("Bloqueio da Amazon; interrompendo o monitoramento.")
-                    raise
+                    consecutive_amazon_blocks += 1
+                    if consecutive_amazon_blocks >= MAX_CONSECUTIVE_AMAZON_BLOCKS:
+                        logger.error(
+                            "Monitoramento encerrado após %s bloqueios consecutivos "
+                            "da Amazon.",
+                            consecutive_amazon_blocks,
+                        )
+                        raise
+                    logger.warning(
+                        "ASIN %s ignorado após bloqueio da Amazon (%s/%s "
+                        "bloqueios consecutivos).",
+                        identifier,
+                        consecutive_amazon_blocks,
+                        MAX_CONSECUTIVE_AMAZON_BLOCKS,
+                    )
                 except AmazonScrapingError as exc:
                     summary.errors += 1
                     summary.record_error(exc)
                     logger.warning("Consulta ignorada para %s: %s", identifier, exc)
                 except TelegramError as exc:
+                    consecutive_amazon_blocks = 0
                     summary.errors += 1
                     summary.record_error(exc)
                     logger.error(
