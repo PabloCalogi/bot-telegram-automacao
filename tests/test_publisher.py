@@ -481,6 +481,78 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             logs.output[-1],
         )
 
+    async def test_main_exits_successfully_after_amazon_circuit_breaker(self):
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            telegram_admin_chat_id="12345",
+        )
+        summary = ExecutionSummary()
+        run_count = 0
+
+        def run_and_raise_for_monitor(coroutine):
+            nonlocal run_count
+            run_count += 1
+            coroutine.close()
+            if run_count == 1:
+                summary.analyzed = 3
+                summary.errors = 3
+                raise AmazonAccessBlocked("3 bloqueios consecutivos")
+
+        with (
+            patch("sys.argv", ["app.main", "--once"]),
+            patch("app.main.Settings.from_env", return_value=settings),
+            patch("app.main.ExecutionSummary", return_value=summary),
+            patch("app.main.monitor_offers", new_callable=AsyncMock),
+            patch(
+                "app.main.asyncio.run",
+                side_effect=run_and_raise_for_monitor,
+            ),
+            patch(
+                "app.main.send_health_alert_if_needed",
+                new_callable=AsyncMock,
+            ) as health_alert_mock,
+            patch("app.main.close_amazon_session"),
+            self.assertLogs("app.main", level="INFO") as logs,
+        ):
+            self.assertIsNone(main())
+
+        self.assertTrue(
+            any("bloqueio temporário de IP" in line for line in logs.output)
+        )
+        self.assertTrue(
+            any("Resumo da execução | Analisados: 3" in line for line in logs.output)
+        )
+        health_alert_mock.assert_called_once_with(
+            summary,
+            "token",
+            "12345",
+            fatal=False,
+        )
+
+    async def test_main_exits_with_error_for_unexpected_monitor_exception(self):
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+        )
+
+        def run_and_raise(coroutine):
+            coroutine.close()
+            raise RuntimeError("falha inesperada")
+
+        with (
+            patch("sys.argv", ["app.main", "--once"]),
+            patch("app.main.Settings.from_env", return_value=settings),
+            patch("app.main.monitor_offers", new_callable=AsyncMock),
+            patch("app.main.asyncio.run", side_effect=run_and_raise),
+            patch("app.main.close_amazon_session"),
+            self.assertLogs("app.main", level="INFO"),
+        ):
+            with self.assertRaises(SystemExit) as exit_error:
+                main()
+
+        self.assertEqual(exit_error.exception.code, 1)
+
     async def test_main_includes_discovered_products_when_enabled(self):
         settings = Settings(
             telegram_bot_token="token",

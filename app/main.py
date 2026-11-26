@@ -133,9 +133,11 @@ def main() -> None:
         summary.record_error(exc)
         raise SystemExit(str(exc)) from exc
     except AmazonAccessBlocked as exc:
-        fatal = True
-        logger.error("Monitoramento encerrado após bloqueio da Amazon: %s", exc)
-        raise SystemExit(1) from None
+        logger.warning(
+            "Monitoramento encerrado pelo circuit breaker após bloqueios "
+            "consecutivos da Amazon; possível bloqueio temporário de IP: %s",
+            exc,
+        )
     except TelegramError as exc:
         fatal = True
         summary.errors += 1
@@ -150,7 +152,7 @@ def main() -> None:
         summary.errors += 1
         summary.record_error(exc)
         logger.error("Falha fatal no bot (%s).", type(exc).__name__)
-        raise
+        raise SystemExit(1) from exc
     finally:
         try:
             if args.once:
