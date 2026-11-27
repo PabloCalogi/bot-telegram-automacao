@@ -88,8 +88,8 @@ class SQLiteOfferStore:
                     )
                     return False
 
-                is_new_lowest = current_price < row[0]
-                if is_new_lowest:
+                is_lowest_price = current_price <= row[0]
+                if current_price < row[0]:
                     connection.execute(
                         """
                         UPDATE price_history
@@ -107,7 +107,7 @@ class SQLiteOfferStore:
                         """,
                         (current_price, normalized_asin),
                     )
-        return is_new_lowest
+        return is_lowest_price
 
     def has_been_sent(self, asin: str) -> bool:
         normalized_asin = _normalize_asin(asin)

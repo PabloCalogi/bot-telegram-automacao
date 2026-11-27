@@ -83,6 +83,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
             telegram_bot_token="token",
             telegram_channel_id="@canal",
             amazon_associate_tag="exemplo-20",
+            telegram_admin_chat_id="123456",
         )
         bot = self.make_bot()
 
@@ -108,6 +109,7 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(duplicate_result, ProcessResult.IGNORED)
         bot.send_message.assert_awaited_once()
         send_args = bot.send_message.await_args.kwargs
+        self.assertEqual(send_args["chat_id"], "@canal")
         message = send_args["text"]
         self.assertEqual(
             message,
@@ -128,6 +130,75 @@ class PublisherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             button.url,
             "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
+        )
+
+    async def test_vip_discount_sends_whatsapp_formatted_alert_to_admin(self):
+        product = make_product(current_price=Decimal("70"))
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+            telegram_admin_chat_id="123456",
+        )
+        bot = self.make_bot()
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    product.asin,
+                    bot,
+                    store,
+                    settings,
+                )
+
+        self.assertIs(result, ProcessResult.PUBLISHED)
+        self.assertEqual(bot.send_message.await_count, 2)
+        channel_message, admin_alert = [
+            await_args.kwargs for await_args in bot.send_message.await_args_list
+        ]
+        self.assertEqual(channel_message["chat_id"], "@canal")
+        self.assertEqual(admin_alert["chat_id"], "123456")
+        self.assertNotIn("parse_mode", admin_alert)
+        self.assertIn("*ALERTA VIP", admin_alert["text"])
+        self.assertIn("*Produto de teste*", admin_alert["text"])
+        self.assertIn("~R$ 100,00~", admin_alert["text"])
+        self.assertIn("*Por: R$ 70,00*", admin_alert["text"])
+        self.assertIn("*30% OFF*", admin_alert["text"])
+        self.assertIn(
+            "https://www.amazon.com.br/dp/B000000001?tag=exemplo-20",
+            admin_alert["text"],
+        )
+        self.assertNotIn("<a ", admin_alert["text"])
+
+    async def test_new_lowest_price_sends_vip_alert_at_regular_discount(self):
+        product = make_product(current_price=Decimal("80"))
+        settings = Settings(
+            telegram_bot_token="token",
+            telegram_channel_id="@canal",
+            amazon_associate_tag="exemplo-20",
+            telegram_admin_chat_id="123456",
+        )
+        bot = self.make_bot()
+
+        with TemporaryDirectory() as directory:
+            store = SQLiteOfferStore(Path(directory) / "offers.sqlite3")
+            store.initialize()
+            store.record_price(product.asin, 90.0)
+            with patch("app.publisher.fetch_product", return_value=product):
+                result = await process_product(
+                    product.asin,
+                    bot,
+                    store,
+                    settings,
+                )
+
+        self.assertIs(result, ProcessResult.PUBLISHED)
+        self.assertEqual(bot.send_message.await_count, 2)
+        self.assertEqual(
+            bot.send_message.await_args_list[1].kwargs["chat_id"],
+            "123456",
         )
 
     async def test_new_publication_marks_price_below_existing_history(self):

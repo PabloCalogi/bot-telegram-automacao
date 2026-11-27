@@ -48,6 +48,7 @@ class Settings:
     discovery_max_price: Decimal = DISCOVERY_MAX_PRICE
     discovery_min_rating: Decimal = DISCOVERY_MIN_RATING
     discovery_min_reviews: int = DISCOVERY_MIN_REVIEWS
+    vip_min_discount_percent: Decimal = Decimal("30")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -78,6 +79,21 @@ class Settings:
             or min_discount_percent > 100
         ):
             raise ValueError("MIN_DISCOUNT_PERCENT deve estar entre 0 e 100.")
+
+        try:
+            vip_min_discount_percent = Decimal(
+                os.getenv("VIP_MIN_DISCOUNT_PERCENT", "30").strip()
+            )
+        except InvalidOperation as exc:
+            raise ValueError(
+                "VIP_MIN_DISCOUNT_PERCENT deve ser um número entre 0 e 100."
+            ) from exc
+        if (
+            not vip_min_discount_percent.is_finite()
+            or vip_min_discount_percent < 0
+            or vip_min_discount_percent > 100
+        ):
+            raise ValueError("VIP_MIN_DISCOUNT_PERCENT deve estar entre 0 e 100.")
 
         try:
             poll_interval_seconds = int(os.getenv("POLL_INTERVAL_SECONDS", "3600"))
@@ -171,6 +187,7 @@ class Settings:
             telegram_bot_token=values["TELEGRAM_BOT_TOKEN"],
             telegram_channel_id=values["TELEGRAM_CHANNEL_ID"],
             min_discount_percent=min_discount_percent,
+            vip_min_discount_percent=vip_min_discount_percent,
             amazon_associate_tag=os.getenv("AMAZON_ASSOCIATE_TAG", "").strip(),
             product_identifiers=product_identifiers,
             poll_interval_seconds=poll_interval_seconds,

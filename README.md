@@ -14,6 +14,7 @@ Bot automatizado em Python para monitorar ofertas na **Amazon Brasil**, aplicar 
   - Edita automaticamente a mensagem no canal quando o preço de uma oferta ativa muda.
   - Exclui automaticamente a mensagem quando o produto fica sem estoque ou cai abaixo do desconto mínimo (`MIN_DISCOUNT_PERCENT`).
 - **Histórico de Menor Preço**: registra o menor valor já visto por ASIN e adiciona automaticamente o selo **`🚨 MENOR PREÇO REGISTRADO`** quando o produto atinge um novo piso histórico.
+- **Alertas de Ofertas VIP**: envia ao administrador uma mensagem formatada para WhatsApp quando o desconto atinge `VIP_MIN_DISCOUNT_PERCENT` ou o preço estabelece um novo menor histórico.
 - **Resiliência e Segurança**:
   - Scraping com `curl_cffi` e retentativa automática para falhas temporárias de rede/SSL.
   - Proteção contra *rate limit* do Telegram (`HTTP 429 / RetryAfter`) com espera automática e intervalo entre envios.
@@ -58,6 +59,7 @@ Crie um arquivo `.env` na raiz do projeto (baseado no `.env.example`) e configur
 | `TELEGRAM_CHANNEL_ID` | Sim | — | ID do canal do Telegram (ex: `-100...`) |
 | `AMAZON_ASSOCIATE_TAG` | Sim | — | Tag de afiliado da Amazon Brasil |
 | `MIN_DISCOUNT_PERCENT` | Não | `15` | Desconto mínimo (%) para publicar uma oferta |
+| `VIP_MIN_DISCOUNT_PERCENT` | Não | `30` | Desconto mínimo (%) para enviar um alerta VIP privado |
 | `POLL_INTERVAL_SECONDS` | Não | `3600` | Intervalo entre ciclos no modo contínuo |
 | `TELEGRAM_ADMIN_CHAT_ID` | Não | — | ID do chat privado para alertas de saúde |
 | `ENABLE_AUTO_DISCOVERY` | Não | `false` | Ativa (`true`) ou desativa a descoberta automática |
@@ -67,7 +69,7 @@ Crie um arquivo `.env` na raiz do projeto (baseado no `.env.example`) e configur
 | `DISCOVERY_MIN_RATING` | Não | `4.3` | Nota mínima (de 5) para itens descobertos |
 | `DISCOVERY_MIN_REVIEWS` | Não | `50` | Número mínimo de avaliações para itens descobertos |
 
-> **Dica:** Para receber alertas de saúde, abra uma conversa privada com o seu bot no Telegram e clique em **Iniciar (`/start`)** antes de ativar o `TELEGRAM_ADMIN_CHAT_ID`.
+> **Dica:** Para receber alertas VIP e de saúde, abra uma conversa privada com o seu bot no Telegram e clique em **Iniciar (`/start`)** antes de ativar o `TELEGRAM_ADMIN_CHAT_ID`.
 
 ---
 

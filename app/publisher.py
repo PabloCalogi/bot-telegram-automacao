@@ -118,11 +118,85 @@ def format_offer_message(
     return "\n".join(lines)
 
 
+def format_vip_alert_message(
+    product: Product,
+    analysis: DiscountAnalysis,
+    affiliate_url: str,
+) -> str:
+    if (
+        not analysis.approved
+        or analysis.discount_percent is None
+        or product.original_price is None
+        or product.current_price is None
+    ):
+        raise ValueError("Não é possível formatar um produto não aprovado como oferta.")
+
+    title = " ".join(product.title.split())
+    if len(title) > 120:
+        title = title[:117] + "..."
+    discount = analysis.discount_percent.quantize(
+        Decimal("1"),
+        rounding=ROUND_HALF_UP,
+    )
+    return "\n".join(
+        [
+            "🚨🔥 *ALERTA VIP - CLUBE DO MAGO* 🔥🚨",
+            "",
+            f"📦 *{title}*",
+            "",
+            f"💸 De: ~R$ {_format_brl(product.original_price)}~",
+            f"✅ *Por: R$ {_format_brl(product.current_price)}*",
+            f"📉 *{discount}% OFF*",
+            "",
+            f"🔗 *Link de afiliado:* {affiliate_url}",
+        ]
+    )
+
+
 def _build_reply_markup(product: Product, settings: Settings) -> InlineKeyboardMarkup:
     affiliate_url = build_affiliate_url(product.asin, settings.amazon_associate_tag)
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("🛒 Ver oferta na Amazon", url=affiliate_url)]]
     )
+
+
+async def send_vip_alert_if_needed(
+    product: Product,
+    analysis: DiscountAnalysis,
+    bot: Bot,
+    settings: Settings,
+    is_lowest_price: bool,
+) -> None:
+    if not settings.telegram_admin_chat_id or not (
+        is_lowest_price
+        or (
+            analysis.discount_percent is not None
+            and analysis.discount_percent >= settings.vip_min_discount_percent
+        )
+    ):
+        return
+
+    message = format_vip_alert_message(
+        product,
+        analysis,
+        build_affiliate_url(product.asin, settings.amazon_associate_tag),
+    )
+    while True:
+        try:
+            await bot.send_message(
+                chat_id=settings.telegram_admin_chat_id,
+                text=message,
+            )
+            return
+        except RetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 1)
+        except TelegramError as exc:
+            logger.warning(
+                "Não foi possível enviar o alerta VIP privado do ASIN %s (%s).",
+                product.asin,
+                type(exc).__name__,
+            )
+            return
 
 
 async def publish_offer(
@@ -364,6 +438,13 @@ async def process_product(
             settings,
             is_lowest_price=is_lowest_price,
         )
+        await send_vip_alert_if_needed(
+            product,
+            analysis,
+            bot,
+            settings,
+            is_lowest_price,
+        )
         if not store.update_price(product.asin, product.current_price):
             raise RuntimeError(
                 f"Não foi possível atualizar o preço do ASIN {product.asin}."
@@ -380,6 +461,13 @@ async def process_product(
         bot,
         settings,
         is_lowest_price=is_lowest_price,
+    )
+    await send_vip_alert_if_needed(
+        product,
+        analysis,
+        bot,
+        settings,
+        is_lowest_price,
     )
     await asyncio.sleep(PUBLISH_DELAY_SECONDS)
     if not store.record_sent(

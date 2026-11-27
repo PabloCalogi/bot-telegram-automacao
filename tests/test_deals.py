@@ -66,6 +66,7 @@ class DealAnalysisTests(unittest.TestCase):
             "TELEGRAM_BOT_TOKEN": "test-token",
             "TELEGRAM_CHANNEL_ID": "@test-channel",
             "MIN_DISCOUNT_PERCENT": "12.5",
+            "VIP_MIN_DISCOUNT_PERCENT": "35",
             "AMAZON_ASSOCIATE_TAG": "associado-20",
             "PRODUCT_IDENTIFIERS": (
                 "B000000001, https://www.amazon.com.br/dp/B000000002\n"
@@ -82,6 +83,7 @@ class DealAnalysisTests(unittest.TestCase):
                 settings = Settings.from_env()
 
         self.assertEqual(settings.min_discount_percent, Decimal("12.5"))
+        self.assertEqual(settings.vip_min_discount_percent, Decimal("35"))
         self.assertEqual(settings.amazon_associate_tag, "associado-20")
         self.assertEqual(
             settings.product_identifiers,
@@ -116,6 +118,7 @@ class DealAnalysisTests(unittest.TestCase):
                 settings = Settings.from_env()
 
         self.assertEqual(settings.telegram_admin_chat_id, "123456")
+        self.assertEqual(settings.vip_min_discount_percent, Decimal("30"))
         self.assertTrue(settings.enable_auto_discovery)
         self.assertEqual(settings.discovery_max_items, 7)
         self.assertEqual(settings.discovery_min_price, Decimal("35.5"))
